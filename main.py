@@ -45,11 +45,8 @@ async def webhook_spam(url, message, count):
 
 # Run single bot
 async def run_bot(token):
-    intents = discord.Intents.default()
-    intents.messages = True
-    intents.guilds = True
-    intents.members = True
-    bot = commands.Bot(command_prefix="!", self_bot=True, intents=intents)
+    # discord.py-self does NOT use intents
+    bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
     @bot.event
