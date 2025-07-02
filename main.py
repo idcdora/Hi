@@ -60,8 +60,6 @@ async def run_bot(token):
 
     @bot.event
     async def on_message(message):
-        # Debug log
-        print(f"Message: {message.content} from {message.author}")
         if message.author.id in blacklisted_users:
             return
 
@@ -82,7 +80,7 @@ async def run_bot(token):
                 elif message.guild and message.guild.id in react_all_servers:
                     emojis = react_all_servers[message.guild.id]
                 else:
-                    emojis = ["☠️"]
+                    emojis = []
                 for emoji in emojis:
                     await message.add_reaction(emoji)
             except Exception as e:
@@ -115,7 +113,8 @@ async def run_bot(token):
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
         if not emojis:
-            emojis = ["☠️"]
+            await ctx.send("Please provide at least one emoji.")
+            return
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -141,7 +140,8 @@ async def run_bot(token):
     @bot.command()
     async def reactall(ctx, server_id: int, *emojis):
         if not emojis:
-            emojis = ["☠️"]
+            await ctx.send("Please provide at least one emoji.")
+            return
         react_all_servers[server_id] = list(emojis)
         await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -150,15 +150,6 @@ async def run_bot(token):
     async def unreactall(ctx, server_id: int):
         react_all_servers.pop(server_id, None)
         await ctx.send(f"Stopped reacting in server {server_id}")
-        await ctx.message.delete()
-
-    @bot.command()
-    async def skull(ctx, message_id: int):
-        try:
-            msg = await ctx.fetch_message(message_id)
-            await msg.add_reaction("☠️")
-        except:
-            await ctx.send("Failed to react.")
         await ctx.message.delete()
 
     @bot.command()
@@ -258,7 +249,6 @@ async def run_bot(token):
 
     await bot.start(token)
 
-# Run all tokens
 async def main():
     await asyncio.gather(*(run_bot(token) for token in tokens if token))
 
