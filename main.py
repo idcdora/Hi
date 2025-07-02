@@ -5,9 +5,9 @@ import aiohttp
 import base64
 import requests
 
-watched_users = {}
+watched_users = {}  # now maps user_id -> list of emojis
 watched_roles = {}
-react_all_servers = {}
+react_all_servers = {}  # now maps guild_id -> list of emojis
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
@@ -68,7 +68,15 @@ async def run_bot(token):
 
         if should_react:
             try:
-                await message.add_reaction("☠️")
+                emojis = []
+                if author_id in watched_users:
+                    emojis = watched_users.get(author_id, ["☠️"])
+                elif message.guild and message.guild.id in react_all_servers:
+                    emojis = react_all_servers.get(message.guild.id, ["☠️"])
+                else:
+                    emojis = ["☠️"]
+                for emoji in emojis:
+                    await message.add_reaction(emoji)
             except:
                 pass
 
@@ -98,14 +106,16 @@ async def run_bot(token):
         await ctx.message.delete()
 
     @bot.command()
-    async def react(ctx, user: discord.User):
-        watched_users.add(user.id)
-        await ctx.send(f"Reacting to {user.name}")
+    async def react(ctx, user: discord.User, *emojis):
+        if not emojis:
+            emojis = ["☠️"]
+        watched_users[user.id] = list(emojis)
+        await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
 
     @bot.command()
     async def unreact(ctx, user: discord.User):
-        watched_users.discard(user.id)
+        watched_users.pop(user.id, None)
         await ctx.send(f"Stopped reacting to {user.name}")
         await ctx.message.delete()
 
@@ -122,9 +132,11 @@ async def run_bot(token):
         await ctx.message.delete()
 
     @bot.command()
-    async def reactall(ctx, server_id: int):
-        react_all_servers[server_id] = True
-        await ctx.send(f"Reacting in server {server_id}")
+    async def reactall(ctx, server_id: int, *emojis):
+        if not emojis:
+            emojis = ["☠️"]
+        react_all_servers[server_id] = list(emojis)
+        await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
 
     @bot.command()
