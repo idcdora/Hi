@@ -291,33 +291,33 @@ async def run_bot(token):
                     break
         await ctx.send(f"Deleted {deleted} messages from {user.name}")
 
-    @bot.command(name="help")
-    async def help_cmd(ctx):
-        help_message = (
-            "**Commands:**\n"
-            "`!react <user> <emojis>` - React to user messages\n"
-            "`!reactall <server_id> <emojis>` - React to all messages in server\n"
-            "`!unreact <user>` - Stop reacting to user\n"
-            "`!unreactall <server_id>` - Stop reacting in server\n"
-            "`!spam <message> <count>` - Spam message\n"
-            "`!spamall <message> <count>` - Spam message for all bots\n"
-            "`!massdmspam <message> <seconds>` - DM spam\n"
-            "`!webhookspam <url> <message> <count>` - Spam webhook\n"
-            "`!rpc <activity_type> <message>` - Set status\n"
-            "`!statusall <activity_type> <message>` - Set status for all bots\n"
-            "`!typer <channel_id>` - Typing indicator spam\n"
-            "`!blacklist <user_id>` - Blacklist user\n"
-            "`!unblacklist <user_id>` - Remove user from blacklist\n"
-            "`!watchrole <role_id> <emojis>` - React to role members\n"
-            "`!unwatchrole <role_id>` - Stop reacting to role members\n"
-            "`!snipe` - Get last deleted message\n"
-            "`!purge <user> <count>` - Delete messages from user\n\n"
-            "Gif for fun: https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif"
-        )
-        try:
-            await ctx.message.channel.send(help_message)
-        except Exception as e:
-            print(f"Failed to send help message: {e}")
+@bot.command(name="h")
+async def help_cmd(ctx):
+    help_message = (
+        "**Commands:**\n"
+        "`!react <user> <emojis>` - React to user messages\n"
+        "`!reactall <server_id> <emojis>` - React to all messages in server\n"
+        "`!unreact <user>` - Stop reacting to user\n"
+        "`!unreactall <server_id>` - Stop reacting in server\n"
+        "`!spam <message> <count>` - Spam message\n"
+        "`!spamall <message> <count>` - Spam message for all bots\n"
+        "`!massdmspam <message> <seconds>` - DM spam\n"
+        "`!webhookspam <url> <message> <count>` - Spam webhook\n"
+        "`!rpc <activity_type> <message>` - Set status\n"
+        "`!statusall <activity_type> <message>` - Set status for all bots\n"
+        "`!typer <channel_id>` - Typing indicator spam\n"
+        "`!blacklist <user_id>` - Blacklist user\n"
+        "`!unblacklist <user_id>` - Remove user from blacklist\n"
+        "`!watchrole <role_id> <emojis>` - React to role members\n"
+        "`!unwatchrole <role_id>` - Stop reacting to role members\n"
+        "`!snipe` - Get last deleted message\n"
+        "`!purge <user> <count>` - Delete messages from user\n\n"
+        "Gif for fun: https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif"
+    )
+    try:
+        await ctx.send(help_message)
+    except Exception as e:
+        print(f"Failed to send help message: {e}")
 
     await bot.start(token)
 
