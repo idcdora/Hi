@@ -6,13 +6,13 @@ import base64
 import requests
 
 watched_users = {}  # user_id -> list of emojis
-watched_roles = {}  # role_id -> list of emojis (changed to dict for emoji mapping)
+watched_roles = {}  # role_id -> list of emojis
 react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
 
-# For snipe command - last deleted message per channel
+# For snipe command: store last deleted message per channel
 last_deleted_messages = {}  # channel_id -> (author, content)
 
 # Load tokens
@@ -47,6 +47,7 @@ async def webhook_spam(url, message, count):
                 pass
 
 async def run_bot(token):
+    # NO intents for discord.py-self
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
@@ -58,9 +59,8 @@ async def run_bot(token):
 
     @bot.event
     async def on_message_delete(message):
-        # Save last deleted message per channel for snipe
-        if message.author and message.content:
-            last_deleted_messages[message.channel.id] = (message.author, message.content)
+        # Save last deleted message for snipe
+        last_deleted_messages[message.channel.id] = (message.author, message.content)
 
     @bot.event
     async def on_message(message):
@@ -73,25 +73,23 @@ async def run_bot(token):
             author_id == bot.user.id or
             author_id in token_user_ids or
             author_id in watched_users or
-            any(role in watched_roles for role in author_roles) or
+            any(role_id in watched_roles for role_id in author_roles) or
             (message.guild and message.guild.id in react_all_servers)
         )
 
         if should_react:
             try:
-                emojis = []
                 if author_id in watched_users:
-                    emojis.extend(watched_users[author_id])
-                # add role emojis for all roles user has
-                for role_id in author_roles:
-                    if role_id in watched_roles:
-                        emojis.extend(watched_roles[role_id])
-                if message.guild and message.guild.id in react_all_servers:
-                    emojis.extend(react_all_servers[message.guild.id])
-
-                # remove duplicates but keep order
-                seen = set()
-                emojis = [e for e in emojis if not (e in seen or seen.add(e))]
+                    emojis = watched_users[author_id]
+                else:
+                    # Collect emojis for all roles that author has from watched_roles dict
+                    emojis = []
+                    for role_id in author_roles:
+                        if role_id in watched_roles:
+                            emojis.extend(watched_roles[role_id])
+                    # If no emojis from roles, check react_all_servers for guild
+                    if not emojis and message.guild and message.guild.id in react_all_servers:
+                        emojis = react_all_servers[message.guild.id]
 
                 for emoji in emojis:
                     await message.add_reaction(emoji)
@@ -110,7 +108,6 @@ async def run_bot(token):
         await bot.process_commands(message)
 
     # Commands
-
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -139,18 +136,30 @@ async def run_bot(token):
         await ctx.message.delete()
 
     @bot.command()
-    async def watchrole(ctx, role: discord.Role, *emojis):
-        if not emojis:
-            await ctx.send("Please provide at least one emoji.")
+    async def watchrole(ctx, *, args):
+        # Accept input like: "123 😭 321 💔"
+        parts = args.split()
+        if len(parts) < 2 or len(parts) % 2 != 0:
+            await ctx.send("Usage: !watchrole <role_id> <emoji> [<role_id> <emoji> ...]")
             return
-        watched_roles[role.id] = list(emojis)
-        await ctx.send(f"Now reacting to role {role.name} with {''.join(emojis)}")
+        added_roles = []
+        for i in range(0, len(parts), 2):
+            role_id = int(parts[i])
+            emoji = parts[i+1]
+            if role_id not in watched_roles:
+                watched_roles[role_id] = []
+            watched_roles[role_id].append(emoji)
+            added_roles.append(f"{role_id} with {emoji}")
+        await ctx.send(f"Watching roles: {', '.join(added_roles)}")
         await ctx.message.delete()
 
     @bot.command()
-    async def unwatchrole(ctx, role: discord.Role):
-        watched_roles.pop(role.id, None)
-        await ctx.send(f"Stopped watching role {role.name}")
+    async def unwatchrole(ctx, role_id: int):
+        if role_id in watched_roles:
+            watched_roles.pop(role_id)
+            await ctx.send(f"Stopped watching role {role_id}")
+        else:
+            await ctx.send(f"Role {role_id} not being watched")
         await ctx.message.delete()
 
     @bot.command()
@@ -259,66 +268,56 @@ async def run_bot(token):
             async with channel.typing():
                 await asyncio.sleep(5)
 
-    # Snipe command - shows last deleted message in channel
     @bot.command()
     async def snipe(ctx):
         data = last_deleted_messages.get(ctx.channel.id)
         if not data:
-            await ctx.send("Nothing to snipe.")
+            await ctx.send("There's nothing to snipe!")
             return
         author, content = data
-        embed = discord.Embed(title="Last Deleted Message", color=discord.Color.red())
-        embed.set_author(name=str(author), icon_url=author.avatar.url if author.avatar else None)
-        embed.description = content
+        embed = discord.Embed(title="Sniped Message", color=0xFF0000)
+        embed.set_author(name=str(author), icon_url=author.display_avatar.url if author.display_avatar else None)
+        embed.add_field(name="Content", value=content, inline=False)
         await ctx.send(embed=embed)
 
-    # Purge command - delete last N messages from a specific user
     @bot.command()
-    async def purge(ctx, user: discord.User, count: int):
-        if count <= 0:
-            await ctx.send("Count must be positive.")
+    async def purge(ctx, user: discord.User, amount: int):
+        if amount <= 0:
+            await ctx.send("Amount must be greater than 0.")
             return
         deleted = 0
-        async for msg in ctx.channel.history(limit=100):
-            if msg.author.id == user.id:
-                try:
-                    await msg.delete()
-                    deleted += 1
-                    if deleted >= count:
-                        break
-                except Exception:
-                    pass
-        await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=10)
+        async for message in ctx.channel.history(limit=1000):
+            if deleted >= amount:
+                break
+            if message.author.id == user.id:
+                await message.delete()
+                deleted += 1
+        await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
-    # Clean help command with embed and gif image
-    @bot.command(name="h")
     @bot.command(name="help")
     async def help_cmd(ctx):
         embed = discord.Embed(
-            title="Help - Commands List",
-            description=(
-                "**!react <user> <emojis...>** - Reacts to user's messages with given emojis\n"
-                "**!unreact <user>** - Stops reacting to user\n"
-                "**!watchrole <role> <emojis...>** - Reacts to users with role\n"
-                "**!unwatchrole <role>** - Stops reacting to role\n"
-                "**!reactall <server_id> <emojis...>** - Reacts to all messages in server\n"
-                "**!unreactall <server_id>** - Stops reacting in server\n"
-                "**!spam <message> <count>** - Spam message count times\n"
-                "**!spamall <message> <count>** - Spam message to all\n"
-                "**!massdmspam <message> <seconds>** - Mass DM spam\n"
-                "**!webhookspam <url> <message> <count>** - Webhook spam\n"
-                "**!rpc <type> <message>** - Set rich presence (playing, streaming, etc.)\n"
-                "**!statusall <type> <message>** - Set all bots' status\n"
-                "**!typer <channel_id>** - Typing status forever\n"
-                "**!snipe** - Show last deleted message in channel\n"
-                "**!purge <user> <count>** - Delete last count messages from user\n"
-                "**!blacklist <user_id>** / **!unblacklist <user_id>** - Blacklist user from bot\n"
-            ),
-            color=discord.Color.blue()
+            title="Bot Commands",
+            description="Here are the available commands:",
+            color=0x3498db
         )
-        # Add the gif image
-        embed.set_image(url="https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
+        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
+        embed.add_field(name="!react <user> <emojis...>", value="React to messages from a user with specified emojis.", inline=False)
+        embed.add_field(name="!unreact <user>", value="Stop reacting to a user's messages.", inline=False)
+        embed.add_field(name="!watchrole <role_id> <emoji> [<role_id> <emoji> ...]", value="React to messages from users with specified role(s).", inline=False)
+        embed.add_field(name="!unwatchrole <role_id>", value="Stop reacting to a role.", inline=False)
+        embed.add_field(name="!reactall <server_id> <emojis...>", value="React to all messages in a server with specified emojis.", inline=False)
+        embed.add_field(name="!unreactall <server_id>", value="Stop reacting in a server.", inline=False)
+        embed.add_field(name="!spam <message> <count>", value="Spam a message multiple times.", inline=False)
+        embed.add_field(name="!spamall <message> <count>", value="Spam a message across all bots.", inline=False)
+        embed.add_field(name="!massdmspam <message> <seconds>", value="Spam DM messages to all guild members for seconds.", inline=False)
+        embed.add_field(name="!webhookspam <url> <message> <count>", value="Spam a webhook.", inline=False)
+        embed.add_field(name="!rpc <type> <message>", value="Change bot presence (playing, streaming, etc.).", inline=False)
+        embed.add_field(name="!statusall <type> <message>", value="Change presence for all bots.", inline=False)
+        embed.add_field(name="!typer <channel_id>", value="Type forever in a channel.", inline=False)
+        embed.add_field(name="!snipe", value="Show last deleted message in the channel.", inline=False)
+        embed.add_field(name="!purge <user> <amount>", value="Delete a number of messages from a user in the channel.", inline=False)
         await ctx.send(embed=embed)
 
     await bot.start(token)
