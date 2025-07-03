@@ -43,13 +43,12 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
-# For sniping deleted messages
-snipes = {}  # channel_id -> (author, content)
-
 # Run single bot
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
+
+    last_message = {}
 
     @bot.event
     async def on_ready():
@@ -58,20 +57,17 @@ async def run_bot(token):
         _sync_activity(str(bot.user), token)
 
     @bot.event
-    async def on_message_delete(message):
-        if message.guild is None:
-            # Save DM snipes too
-            snipes[message.channel.id] = (message.author, message.content)
-        else:
-            snipes[message.channel.id] = (message.author, message.content)
-
-    @bot.event
     async def on_message(message):
         if message.author.id in blacklisted_users:
             return
 
+        # Store last deleted message for snipe
+        if isinstance(message.channel, discord.DMChannel) or message.guild:
+            last_message[message.channel.id] = message
+
         author_id = message.author.id
         author_roles = {role.id for role in getattr(message.author, "roles", [])}
+
         should_react = (
             author_id == bot.user.id or
             author_id in token_user_ids or
@@ -85,7 +81,7 @@ async def run_bot(token):
                 if author_id in watched_users:
                     emojis = watched_users[author_id]
                 elif any(role_id in watched_roles for role_id in author_roles):
-                    # React with all emojis from all matched roles
+                    # Aggregate emojis from all matching roles
                     emojis = []
                     for role_id in author_roles:
                         if role_id in watched_roles:
@@ -110,7 +106,6 @@ async def run_bot(token):
 
         await bot.process_commands(message)
 
-    # Commands
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -144,16 +139,16 @@ async def run_bot(token):
             await ctx.send("Please provide at least one emoji.")
             return
         watched_roles[role_id] = list(emojis)
-        await ctx.send(f"Watching role {role_id} with emojis: {''.join(emojis)}")
+        await ctx.send(f"Watching role ID {role_id} with {''.join(emojis)}")
         await ctx.message.delete()
 
     @bot.command()
     async def unwatchrole(ctx, role_id: int):
         if role_id in watched_roles:
             watched_roles.pop(role_id)
-            await ctx.send(f"Stopped watching role {role_id}")
+            await ctx.send(f"Stopped watching role ID {role_id}")
         else:
-            await ctx.send(f"Role {role_id} was not being watched.")
+            await ctx.send(f"Role ID {role_id} was not being watched.")
         await ctx.message.delete()
 
     @bot.command()
@@ -263,39 +258,42 @@ async def run_bot(token):
                 await asyncio.sleep(5)
 
     @bot.command()
-    async def snipe(ctx):
-        channel_id = ctx.channel.id
-        if channel_id not in snipes:
-            await ctx.send("There's nothing to snipe here.")
-            return
-        author, content = snipes[channel_id]
-        await ctx.send(f"Sniped message from {author}: {content}")
-
-    @bot.command()
     async def purge(ctx, user: discord.User, amount: int):
         def is_user(m):
             return m.author == user
-        deleted = await ctx.channel.purge(limit=100, check=is_user)
+        deleted = await ctx.channel.purge(limit=amount, check=is_user)
         await ctx.send(f"Deleted {len(deleted)} messages from {user.name}.", delete_after=5)
+        await ctx.message.delete()
+
+    @bot.command()
+    async def snipe(ctx):
+        channel = ctx.channel
+        msg = last_message.get(channel.id)
+        if msg:
+            content = msg.content or "*No text content*"
+            author = msg.author
+            await ctx.send(f"Last message by {author.name}: {content}")
+        else:
+            await ctx.send("No message to snipe in this channel.")
         await ctx.message.delete()
 
     @bot.command(name="h")
     async def help_cmd(ctx):
         try:
             help_message = (
-                " **Commands** \n\n"
-                "🔹 **Reacting**\n"
+                "**Commands**\n\n"
+                "**🔹 Reacting**\n"
                 "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
-                "🔹 **Spamming**\n"
+                "**🔹 Spamming**\n"
                 "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n\n"
-                "🔹 **Status**\n"
+                "**🔹 Status**\n"
                 "`!rpc`, `!statusall`, `!typer`\n\n"
-                "🔹 **Moderation**\n"
+                "**🔹 Moderation**\n"
                 "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
-                "*:3*\n\n"
-                "https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif"
+                "*Use responsibly :3*"
             )
             await ctx.send(help_message)
+            await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
             await ctx.message.delete()
         except Exception as e:
             print("Failed to send help message:", e)
