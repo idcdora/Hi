@@ -283,7 +283,7 @@ async def run_bot(token):
     async def help_cmd(ctx):
         try:
             help_message = (
-                "🤖 **Self Bot Commands** 🤖\n\n"
+                " **Commands** \n\n"
                 "🔹 **Reacting**\n"
                 "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
                 "🔹 **Spamming**\n"
