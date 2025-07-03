@@ -290,7 +290,7 @@ async def run_bot(token):
                 "`!rpc`, `!statusall`, `!typer`\n\n"
                 "**🔹 Moderation**\n"
                 "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
-                "*Use responsibly :3*"
+                "*:3*"
             )
             await ctx.send(help_message)
             await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
