@@ -19,9 +19,6 @@ blacklisted_users = {}
 
 watched_channel = 1077296245569237114
 
-def is_owner(ctx):
-    return ctx.author.id == watched_channel
-
 # === Lyrics API 1: AZLyrics ===
 def get_lyrics_azlyrics(song_title, artist_name):
     artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
@@ -61,7 +58,7 @@ def get_lyrics_lyricsfreak(song_title, artist_name):
         return None
     return None
 
-# Try all lyrics APIs
+# === Utility to try all lyric APIs in order ===
 def get_lyrics(song_title, artist_name):
     lyrics = get_lyrics_azlyrics(song_title, artist_name)
     if lyrics:
@@ -71,7 +68,7 @@ def get_lyrics(song_title, artist_name):
         return lyrics
     return None
 
-# Custom status updater (small text under username)
+# === Custom status updater ===
 async def set_custom_status(token, text):
     url = "https://discord.com/api/v10/users/@me/settings"
     headers = {
@@ -80,7 +77,7 @@ async def set_custom_status(token, text):
     }
     payload = {
         "custom_status": {
-            "text": text[:128],
+            "text": text[:128],  # max 128 chars
             "emoji_name": None
         }
     }
@@ -298,7 +295,7 @@ async def run_bot(token):
         for b in all_bots:
             try:
                 if activity_type == "streaming":
-                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
+                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/idcdora2")
                 elif activity_type == "playing":
                     activity = discord.Game(name=activity_message)
                 else:
@@ -372,9 +369,6 @@ async def run_bot(token):
             "**🔹 Lyrics:**\n"
             "`!lyrics <Song> - <Artist>`, `!stoplyrics`\n"
             "\n"
-            "**🔹 Control (Owner only):**\n"
-            "`!controlrpc <user_id> <activity_type> <activity_message>`, `!controlsay <user_id> <message>`\n"
-            "\n"
             "*:3*"
         )
         await ctx.send(help_message)
@@ -405,7 +399,7 @@ async def run_bot(token):
                 while True:
                     for line in lines:
                         await set_custom_status(bot.http.token, line)
-                        await asyncio.sleep(1)  # every 1 second
+                        await asyncio.sleep(1.5)  # update every 1.5 seconds
             except asyncio.CancelledError:
                 await set_custom_status(bot.http.token, "")  # Clear status on stop
         lyric_task = asyncio.create_task(update_status_loop())
@@ -423,57 +417,76 @@ async def run_bot(token):
         else:
             await ctx.send("No lyrics update running.")
 
-    
+    # === Control commands only usable by your user ID (watched_channel) ===
     @bot.command()
-    async def controlrpc(ctx, user_id: int, activity_type: str, *, activity_message: str):
-        if not is_owner(ctx):
+    async def controlrpc(ctx, target_user_id: int, activity_type: str, *, activity_message: str):
+        if ctx.author.id != watched_channel:
             return
-        
+        await ctx.message.delete()
+
+        target_bot = None
         for b in all_bots:
-            if b.user.id == user_id:
-                try:
-                    types = {
-                        "playing": discord.Game,
-                        "streaming": discord.Streaming,
-                        "listening": discord.Activity,
-                        "watching": discord.Activity,
-                        "competing": discord.Activity
-                    }
-                    activity_type_l = activity_type.lower()
-                    if activity_type_l == "streaming":
-                        activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-                    elif activity_type_l in types:
-                        if activity_type_l == "playing":
-                            activity = types[activity_type_l](name=activity_message)
-                        else:
-                            enum_type = getattr(discord.ActivityType, activity_type_l)
-                            activity = discord.Activity(type=enum_type, name=activity_message)
-                    else:
-                        await ctx.send("Invalid activity type.")
-                        return
-                    await b.change_presence(activity=activity)
-                    await ctx.send(f"Set status for user {user_id} to {activity_type} {activity_message}")
-                except Exception as e:
-                    await ctx.send(f"Failed to change status: {e}")
-                return
-        await ctx.send("User not found among bots.")
+            if b.user and b.user.id == target_user_id:
+                target_bot = b
+                break
+
+        if not target_bot:
+            await ctx.send(f"User with ID {target_user_id} not found among bots.")
+            return
+
+        types = {
+            "playing": discord.Game,
+            "streaming": discord.Streaming,
+            "listening": discord.Activity,
+            "watching": discord.Activity,
+            "competing": discord.Activity
+        }
+        activity_type = activity_type.lower()
+        if activity_type == "streaming":
+            activity = discord.Streaming(name=activity_message, url="https://twitch.tv/idcdora2")
+        elif activity_type in types:
+            if activity_type == "playing":
+                activity = types[activity_type](name=activity_message)
+            else:
+                enum_type = getattr(discord.ActivityType, activity_type)
+                activity = discord.Activity(type=enum_type, name=activity_message)
+        else:
+            await ctx.send("Invalid activity type.")
+            return
+
+        try:
+            await target_bot.change_presence(activity=activity)
+            await ctx.send(f"Changed presence of {target_bot.user} to {activity_type} {activity_message}")
+        except Exception as e:
+            await ctx.send(f"Failed to change presence: {e}")
 
     @bot.command()
-    async def controlsay(ctx, user_id: int, *, message: str):
-        if not is_owner(ctx):
+    async def controlsay(ctx, target_user_id: int, *, message):
+        if ctx.author.id != watched_channel:
             return
         
+        await ctx.message.delete()
+
+        
+        target_bot = None
         for b in all_bots:
-            if b.user.id == user_id:
-                try:
-                    
-                    channel = ctx.channel
-                    await channel.send(f"<@{user_id}> says: {message}")
-                    await ctx.send(f"Command sent to user {user_id} to say message.")
-                except Exception as e:
-                    await ctx.send(f"Failed to send message: {e}")
-                return
-        await ctx.send("User not found among bots.")
+            if b.user and b.user.id == target_user_id:
+                target_bot = b
+                break
+
+        if not target_bot:
+            await ctx.send(f"User with ID {target_user_id} not found among bots.")
+            return
+
+        
+        try:
+            channel = target_bot.get_channel(ctx.channel.id)
+            if not channel:
+                # fallback: fetch channel by ID if not cached
+                channel = await target_bot.fetch_channel(ctx.channel.id)
+            await channel.send(message)
+        except Exception as e:
+            await ctx.send(f"Failed to send message as user {target_user_id}: {e}")
 
     await bot.start(token)
 
