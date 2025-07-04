@@ -3,23 +3,43 @@ from discord.ext import commands
 import asyncio
 import aiohttp
 import re
+from bs4 import BeautifulSoup
 
-# --- Globals ---
-watched_users = {}
-watched_roles = {}
-react_all_servers = {}
-token_user_ids = set()
-all_bots = []
-blacklisted_users = {}
-
-lyrics_tasks = {}
-lyrics_paused = {}
-
-# Load tokens
+# === GLOBALS ===
+tokens = []
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
-# --- Utils ---
+watched_users = {}
+watched_roles = set()
+react_all_servers = {}
+blacklisted_users = {}
+last_deleted = {}
+typing_tasks = {}
+all_bots = []
+
+# === HELPERS ===
+async def fetch(session, url):
+    async with session.get(url) as resp:
+        return await resp.text()
+
+async def fetch_json(session, url):
+    async with session.get(url) as resp:
+        return await resp.json()
+
+async def scrape_genius_lyrics(url):
+    async with aiohttp.ClientSession() as session:
+        html = await fetch(session, url)
+        soup = BeautifulSoup(html, "html.parser")
+        lyrics_divs = soup.find_all("div", attrs={"data-lyrics-container": "true"})
+        lyrics = "\n".join(div.get_text(separator="\n") for div in lyrics_divs)
+        return lyrics.strip()
+
+async def search_lyrics_api(song):
+    async with aiohttp.ClientSession() as session:
+        data = await fetch_json(session, f"https://api.lyrics.ovh/v1/{song}")
+        return data.get("lyrics")
+
 async def mass_dm(guild, message):
     for member in guild.members:
         if not member.bot:
@@ -36,7 +56,7 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
-# --- Bot Runner ---
+# === MAIN BOT ===
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
@@ -44,95 +64,72 @@ async def run_bot(token):
     @bot.event
     async def on_ready():
         print(f"[+] Logged in as {bot.user}")
-        token_user_ids.add(bot.user.id)
-
-    last_deleted_message = {}
 
     @bot.event
     async def on_message_delete(message):
-        if message.guild:
-            last_deleted_message[message.channel.id] = message
+        last_deleted[message.channel.id] = message
 
     @bot.event
     async def on_message(message):
-        if message.author.id in blacklisted_users:
-            return
-
         author_id = message.author.id
         author_roles = {role.id for role in getattr(message.author, "roles", [])}
         should_react = (
-            author_id == bot.user.id or
-            author_id in token_user_ids or
-            author_id in watched_users or
-            watched_roles.intersection(author_roles) or
-            (message.guild and message.guild.id in react_all_servers)
+            author_id in watched_users
+            or watched_roles.intersection(author_roles)
+            or (message.guild and message.guild.id in react_all_servers)
         )
 
         if should_react:
-            try:
-                if author_id in watched_users:
-                    emojis = watched_users[author_id]
-                elif message.guild and message.guild.id in react_all_servers:
-                    emojis = react_all_servers[message.guild.id]
-                else:
-                    emojis = []
-                for emoji in emojis:
+            emojis = []
+            if author_id in watched_users:
+                emojis = watched_users[author_id]
+            elif message.guild and message.guild.id in react_all_servers:
+                emojis = react_all_servers[message.guild.id]
+            for emoji in emojis:
+                try:
                     await message.add_reaction(emoji)
-            except:
-                pass
-
+                except Exception as e:
+                    print("Reaction error:", e)
         await bot.process_commands(message)
 
-    # --- Commands ---
-    @bot.command(help="Blacklist a user ID.")
-    async def blacklist(ctx, user_id: int):
-        blacklisted_users[user_id] = True
-        await ctx.send(f"User {user_id} blacklisted.")
-        await ctx.message.delete()
-
-    @bot.command(help="Unblacklist a user ID.")
-    async def unblacklist(ctx, user_id: int):
-        blacklisted_users.pop(user_id, None)
-        await ctx.send(f"User {user_id} unblacklisted.")
-        await ctx.message.delete()
-
-    @bot.command(help="React to a user with emojis.")
+    # === ALL COMMANDS ===
+    @bot.command()
     async def react(ctx, user: discord.User, *emojis):
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command(help="Stop reacting to a user.")
+    @bot.command()
     async def unreact(ctx, user: discord.User):
         watched_users.pop(user.id, None)
         await ctx.send(f"Stopped reacting to {user.name}")
         await ctx.message.delete()
 
-    @bot.command(help="Watch a role.")
-    async def watchrole(ctx, role: discord.Role):
+    @bot.command()
+    async def watchrole(ctx, role: discord.Role, *emojis):
         watched_roles.add(role.id)
-        await ctx.send(f"Watching role {role.name}")
+        await ctx.send(f"Watching role {role.name} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command(help="Stop watching a role.")
+    @bot.command()
     async def unwatchrole(ctx, role: discord.Role):
         watched_roles.discard(role.id)
         await ctx.send(f"Stopped watching role {role.name}")
         await ctx.message.delete()
 
-    @bot.command(help="React to all in server.")
+    @bot.command()
     async def reactall(ctx, server_id: int, *emojis):
         react_all_servers[server_id] = list(emojis)
         await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
 
-    @bot.command(help="Stop reacting to all in server.")
+    @bot.command()
     async def unreactall(ctx, server_id: int):
         react_all_servers.pop(server_id, None)
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
 
-    @bot.command(help="Spam a message.")
+    @bot.command()
     async def spam(ctx, *, args):
         msg, count = args.rsplit(" ", 1)
         count = int(count)
@@ -140,143 +137,137 @@ async def run_bot(token):
         for _ in range(count):
             await ctx.send(msg)
 
-    @bot.command(help="Spam message in all bots.")
+    @bot.command()
     async def spamall(ctx, *, args):
         msg, count = args.rsplit(" ", 1)
         count = int(count)
-        await ctx.message.delete()
         trigger = f"[[SPAMALL_TRIGGER]]::{count}::{msg}"
         await ctx.send(trigger)
+        await ctx.message.delete()
 
-    @bot.command(help="Mass DM spam.")
+    @bot.command()
     async def massdmspam(ctx, message, seconds: int):
         await ctx.send(f"Mass DM spam for {seconds}s")
         end_time = asyncio.get_event_loop().time() + seconds
         while asyncio.get_event_loop().time() < end_time:
             await mass_dm(ctx.guild, message)
         await ctx.send("Done mass DM spam.")
+        await ctx.message.delete()
 
-    @bot.command(help="Spam a webhook.")
+    @bot.command()
     async def webhookspam(ctx, url, message, count: int):
         await ctx.send(f"Spamming webhook {count}x...")
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
+        await ctx.message.delete()
 
-    @bot.command(help="Set RPC (custom status).")
+    @bot.command()
     async def rpc(ctx, activity_type: str, *, activity_message: str):
-        activity = discord.Game(name=activity_message)
+        if activity_type == "streaming":
+            activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
+        elif activity_type == "playing":
+            activity = discord.Game(name=activity_message)
+        else:
+            enum_type = getattr(discord.ActivityType, activity_type)
+            activity = discord.Activity(type=enum_type, name=activity_message)
         await bot.change_presence(activity=activity)
         await ctx.send(f"Status set to {activity_type} {activity_message}")
         await ctx.message.delete()
 
-    @bot.command(help="Set status in all bots.")
+    @bot.command()
     async def statusall(ctx, activity_type: str, *, activity_message: str):
         for b in all_bots:
-            await b.change_presence(activity=discord.Game(name=activity_message))
+            try:
+                if activity_type == "streaming":
+                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
+                elif activity_type == "playing":
+                    activity = discord.Game(name=activity_message)
+                else:
+                    enum_type = getattr(discord.ActivityType, activity_type)
+                    activity = discord.Activity(type=enum_type, name=activity_message)
+                await b.change_presence(activity=activity)
+            except:
+                pass
         await ctx.send(f"All bots updated to {activity_type} {activity_message}")
         await ctx.message.delete()
 
-    typer_tasks = {}
-
-    @bot.command(help="Start typing in a channel forever.")
+    @bot.command()
     async def typer(ctx, channel_id: int):
         channel = bot.get_channel(channel_id)
         await ctx.send(f"Typing forever in <#{channel_id}>")
-        async def loop_typing():
+        async def typing_loop():
             while True:
                 async with channel.typing():
                     await asyncio.sleep(5)
-        task = asyncio.create_task(loop_typing())
-        typer_tasks[bot.user.id] = task
+        task = asyncio.create_task(typing_loop())
+        typing_tasks[channel_id] = task
         await ctx.message.delete()
 
-    @bot.command(help="Stop typing.")
-    async def stoptyper(ctx):
-        task = typer_tasks.pop(bot.user.id, None)
+    @bot.command()
+    async def stoptyper(ctx, channel_id: int):
+        task = typing_tasks.get(channel_id)
         if task:
             task.cancel()
-            await ctx.send("Stopped typing.")
+            await ctx.send(f"Stopped typing in <#{channel_id}>.")
         else:
-            await ctx.send("No typing task running.")
+            await ctx.send("No typing running for that channel.")
         await ctx.message.delete()
 
-    @bot.command(help="Snipe the last deleted message.")
+    @bot.command()
+    async def blacklist(ctx, user_id: int):
+        blacklisted_users[user_id] = True
+        await ctx.send(f"User {user_id} blacklisted.")
+        await ctx.message.delete()
+
+    @bot.command()
+    async def unblacklist(ctx, user_id: int):
+        blacklisted_users.pop(user_id, None)
+        await ctx.send(f"User {user_id} unblacklisted.")
+        await ctx.message.delete()
+
+    @bot.command()
+    async def purge(ctx, user: discord.User, limit: int = 100):
+        await ctx.channel.purge(limit=limit, check=lambda m: m.author == user)
+        await ctx.send(f"Purged messages from {user.name}.")
+        await ctx.message.delete()
+
+    @bot.command()
     async def snipe(ctx):
-        msg = last_deleted_message.get(ctx.channel.id)
-        if msg:
-            await ctx.send(f"**{msg.author}:** {msg.content}")
+        msg = last_deleted.get(ctx.channel.id)
+        if msg and msg.content != ctx.message.content:
+            await ctx.send(f"Sniped: `{msg.author}`: {msg.content}")
         else:
-            await ctx.send("Nothing to snipe.")
+            await ctx.send("No message to snipe.")
         await ctx.message.delete()
 
-    # --- Lyrics & Music Features ---
-    @bot.command(help="Set your status to song lyrics.")
-    async def lyrics(ctx, *, song: str):
+    @bot.command()
+    async def lyrics(ctx, *, arg):
         await ctx.message.delete()
-        if lyrics_tasks.get(bot.user.id):
-            lyrics_tasks[bot.user.id].cancel()
-            lyrics_tasks.pop(bot.user.id, None)
-        lyrics_paused[bot.user.id] = False
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(f"https://api.lyrics.ovh/v1/{' '.join(song.split()[:2])}/{song}") as resp:
-                    data = await resp.json()
-                    lyrics_text = data.get("lyrics", None)
-            except:
-                lyrics_text = None
-
-        if not lyrics_text:
-            await ctx.send("❌ Couldn't find lyrics.")
-            return
-
-        lines = [line.strip() for line in lyrics_text.split("\n") if line.strip()]
-        await ctx.send(f"🎵 Now setting status to lyrics of **{song}**.")
-
-        async def rotate_lyrics():
-            i = 0
-            while True:
-                if not lyrics_paused.get(bot.user.id, False):
-                    line = lines[i % len(lines)]
-                    await bot.change_presence(activity=discord.Game(name=line))
-                    i += 1
-                await asyncio.sleep(10)
-
-        task = asyncio.create_task(rotate_lyrics())
-        lyrics_tasks[bot.user.id] = task
-
-    @bot.command(help="Stop lyrics status.")
-    async def stoplyrics(ctx):
-        task = lyrics_tasks.pop(bot.user.id, None)
-        if task:
-            task.cancel()
-            await ctx.send("🛑 Stopped lyrics status.")
+        if re.match(r"https?://(www\.)?genius\.com/.*", arg):
+            lyrics = await scrape_genius_lyrics(arg)
         else:
-            await ctx.send("No lyrics status running.")
-        await ctx.message.delete()
+            lyrics = await search_lyrics_api(arg)
+        if lyrics:
+            snippet = (lyrics[:100] + "...") if len(lyrics) > 100 else lyrics
+            await ctx.send(f"🎵 Lyrics:\n```{snippet}```")
+            await bot.change_presence(activity=discord.Game(name=snippet))
+        else:
+            await ctx.send("Couldn't find lyrics.")
 
-    @bot.command(help="Pause lyrics cycling.")
-    async def pauselyrics(ctx):
-        lyrics_paused[bot.user.id] = True
-        await ctx.send("⏸️ Paused lyrics.")
-        await ctx.message.delete()
-
-    @bot.command(help="Resume lyrics cycling.")
-    async def resumelyrics(ctx):
-        lyrics_paused[bot.user.id] = False
-        await ctx.send("▶️ Resumed lyrics.")
-        await ctx.message.delete()
-
-    @bot.command(name="h", help="Show help menu.")
+    @bot.command(name="h")
     async def help_cmd(ctx):
-        await ctx.send("""**Commands**
-**🔹 Reacting:** `!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`
-**🔹 Spamming:** `!spam`, `!spamall`, `!massdmspam`, `!webhookspam`
-**🔹 Status:** `!rpc`, `!statusall`, `!typer`, `!stoptyper`
-**🔹 Moderation:** `!blacklist`, `!unblacklist`, `!purge`, `!snipe`
-**🔹 Music:** `!lyrics`, `!stoplyrics`, `!pauselyrics`, `!resumelyrics`
-*:3*""")
-        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif?ex=6867de80&is=68668d00&hm=e81e1b88994e14b6b51982fc91d4c3af07dba8bbae87d2c581e787f80b0dca68&")
+        await ctx.message.delete()
+        help_text = (
+            "**Commands**\n\n"
+            "**🔹 Reacting:** `!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
+            "**🔹 Spamming:** `!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
+            "**🔹 Status:** `!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
+            "**🔹 Moderation:** `!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
+            "**🔹 Music:** `!lyrics <song name or genius link>`\n\n"
+            "*:3*"
+        )
+        await ctx.send(help_text)
+        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
 
     await bot.start(token)
 
