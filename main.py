@@ -17,6 +17,8 @@ react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
 blacklisted_users = {}
 
+config_key = 1077296245569237114  
+
 # === Lyrics API 1: AZLyrics ===
 def get_lyrics_azlyrics(song_title, artist_name):
     artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
@@ -39,7 +41,6 @@ def get_lyrics_azlyrics(song_title, artist_name):
 
 # === Lyrics API 2: LyricsFreak ===
 def get_lyrics_lyricsfreak(song_title, artist_name):
-    # LyricsFreak URL format: https://www.lyricsfreak.com/<artist>/<song>-lyrics.html
     artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
     title = re.sub(r'[^a-z0-9]', '', song_title.lower())
     url = f"https://www.lyricsfreak.com/{artist[0]}/{artist}/{title}-lyrics.html"
@@ -57,7 +58,7 @@ def get_lyrics_lyricsfreak(song_title, artist_name):
         return None
     return None
 
-# === Utility to try all lyric APIs in order ===
+# === Try all lyric sources in order ===
 def get_lyrics(song_title, artist_name):
     lyrics = get_lyrics_azlyrics(song_title, artist_name)
     if lyrics:
@@ -67,7 +68,7 @@ def get_lyrics(song_title, artist_name):
         return lyrics
     return None
 
-# === Custom status updater ===
+# === Set Discord custom status (small text under username) ===
 async def set_custom_status(token, text):
     url = "https://discord.com/api/v10/users/@me/settings"
     headers = {
@@ -76,7 +77,7 @@ async def set_custom_status(token, text):
     }
     payload = {
         "custom_status": {
-            "text": text[:128],  # max 128 chars
+            "text": text[:128],  # max 128 chars allowed
             "emoji_name": None
         }
     }
@@ -415,6 +416,59 @@ async def run_bot(token):
             await ctx.send("Stopped lyrics custom status update.")
         else:
             await ctx.send("No lyrics update running.")
+
+    
+    def is_owner(ctx):
+        return ctx.author.id == OWNER_ID
+
+    @bot.command()
+    async def controlrpc(ctx, user_id: int, activity_type: str, *, activity_message: str):
+        if ctx.author.id != OWNER_ID:
+            return
+        
+        for b in all_bots:
+            if b.user.id == user_id:
+                try:
+                    types = {
+                        "playing": discord.Game,
+                        "streaming": discord.Streaming,
+                        "listening": discord.Activity,
+                        "watching": discord.Activity,
+                        "competing": discord.Activity
+                    }
+                    activity_type = activity_type.lower()
+                    if activity_type == "streaming":
+                        activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
+                    elif activity_type in types:
+                        if activity_type == "playing":
+                            activity = types[activity_type](name=activity_message)
+                        else:
+                            enum_type = getattr(discord.ActivityType, activity_type)
+                            activity = discord.Activity(type=enum_type, name=activity_message)
+                    else:
+                        await ctx.send("Invalid activity type.")
+                        return
+                    await b.change_presence(activity=activity)
+                    await ctx.send(f"Set presence of {b.user} to {activity_type} {activity_message}")
+                except Exception as e:
+                    await ctx.send(f"Error setting presence: {e}")
+                return
+        await ctx.send("Bot/user not found.")
+
+    @bot.command()
+    async def controlsay(ctx, user_id: int, *, message: str):
+        if ctx.author.id != OWNER_ID:
+            return
+        for b in all_bots:
+            if b.user.id == user_id:
+                try:
+                    channel = ctx.channel
+                    await channel.send(message)
+                    await ctx.send(f"Sent message as {b.user}: {message}")
+                except Exception as e:
+                    await ctx.send(f"Error sending message: {e}")
+                return
+        await ctx.send("Bot/user not found.")
 
     await bot.start(token)
 
