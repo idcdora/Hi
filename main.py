@@ -2,30 +2,27 @@ import discord
 from discord.ext import commands
 import asyncio
 import aiohttp
-import base64
-import requests
 import lyricsgenius
 
-watched_users = {}  # user_id -> list of emojis
+watched_users = {}
 watched_roles = set()
-react_all_servers = {}  # guild_id -> list of emojis
+react_all_servers = {}
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
+typer_tasks = {}
+lyric_tasks = {}
 
-# Genius API setup (your token)
+EMAILS_FILE = "emails.txt"
+
 GENIUS_TOKEN = "ILkH7espIOfaqvoQ_PSxeUP9nsPonM7C65kb0bZL2l8lUh0B33vJiXN0whJ5mUKf"
 genius = lyricsgenius.Genius(GENIUS_TOKEN)
 genius.remove_section_headers = True
 genius.skip_non_songs = True
 genius.excluded_terms = ["(Remix)", "(Live)"]
 
-# Load tokens
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
-
-# Email storage file
-EMAILS_FILE = "emails.txt"
 
 async def mass_dm(guild, message):
     for member in guild.members:
@@ -47,8 +44,7 @@ async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
-    typer_tasks = {}
-    lyrics_tasks = {}
+    snipes = {}
 
     @bot.event
     async def on_ready():
@@ -72,29 +68,17 @@ async def run_bot(token):
 
         if should_react:
             try:
+                emojis = []
                 if author_id in watched_users:
                     emojis = watched_users[author_id]
                 elif message.guild and message.guild.id in react_all_servers:
                     emojis = react_all_servers[message.guild.id]
-                else:
-                    emojis = []
                 for emoji in emojis:
                     await message.add_reaction(emoji)
             except Exception as e:
                 print("Reaction error:", e)
 
-        if message.content.startswith("[[SPAMALL_TRIGGER]]::") and message.author != bot.user:
-            try:
-                _, count, msg = message.content.split("::", 2)
-                for _ in range(int(count)):
-                    await message.channel.send(msg)
-                    await asyncio.sleep(0.1)
-            except Exception as e:
-                print("SPAMALL error:", e)
-
         await bot.process_commands(message)
-
-    snipes = {}
 
     @bot.event
     async def on_message_delete(message):
@@ -102,6 +86,7 @@ async def run_bot(token):
             return
         snipes[message.channel.id] = message
 
+    # --- Commands ---
     @bot.command()
     async def snipe(ctx):
         msg = snipes.get(ctx.channel.id)
@@ -126,9 +111,6 @@ async def run_bot(token):
 
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
-        if not emojis:
-            await ctx.send("Please provide at least one emoji.")
-            return
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -142,7 +124,7 @@ async def run_bot(token):
     @bot.command()
     async def watchrole(ctx, role: discord.Role, *emojis):
         watched_roles.add(role.id)
-        await ctx.send(f"Watching role {role.name} with emojis: {''.join(emojis) if emojis else 'None'}")
+        await ctx.send(f"Watching role {role.name}")
         await ctx.message.delete()
 
     @bot.command()
@@ -153,11 +135,8 @@ async def run_bot(token):
 
     @bot.command()
     async def reactall(ctx, server_id: int, *emojis):
-        if not emojis:
-            await ctx.send("Please provide at least one emoji.")
-            return
         react_all_servers[server_id] = list(emojis)
-        await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
+        await ctx.send(f"Reacting in server {server_id}")
         await ctx.message.delete()
 
     @bot.command()
@@ -206,43 +185,17 @@ async def run_bot(token):
 
     @bot.command()
     async def rpc(ctx, activity_type: str, *, activity_message: str):
-        types = {
-            "playing": discord.Game,
-            "streaming": discord.Streaming,
-            "listening": discord.Activity,
-            "watching": discord.Activity,
-            "competing": discord.Activity
-        }
-        activity_type = activity_type.lower()
-        if activity_type == "streaming":
-            activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-        elif activity_type in types:
-            if activity_type == "playing":
-                activity = types[activity_type](name=activity_message)
-            else:
-                enum_type = getattr(discord.ActivityType, activity_type)
-                activity = discord.Activity(type=enum_type, name=activity_message)
-        else:
-            await ctx.send("Invalid activity type.")
-            return
-        await bot.change_presence(activity=activity)
-        await ctx.send(f"Status set to {activity_type} {activity_message}")
         await ctx.message.delete()
+        if activity_type.lower() == "playing":
+            await bot.change_presence(activity=discord.Game(name=activity_message))
+        else:
+            await ctx.send("Only 'playing' supported for simple RPC.")
+        await ctx.send(f"Status set to {activity_type} {activity_message}")
 
     @bot.command()
     async def statusall(ctx, activity_type: str, *, activity_message: str):
         for b in all_bots:
-            try:
-                if activity_type == "streaming":
-                    activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-                elif activity_type == "playing":
-                    activity = discord.Game(name=activity_message)
-                else:
-                    enum_type = getattr(discord.ActivityType, activity_type)
-                    activity = discord.Activity(type=enum_type, name=activity_message)
-                await b.change_presence(activity=activity)
-            except:
-                pass
+            await b.change_presence(activity=discord.Game(name=activity_message))
         await ctx.send(f"All bots updated to {activity_type} {activity_message}")
         await ctx.message.delete()
 
@@ -269,7 +222,7 @@ async def run_bot(token):
             typer_tasks.pop(ctx.author.id, None)
             await ctx.send("Typing stopped.")
         else:
-            await ctx.send("You don't have any active typer.")
+            await ctx.send("No active typer.")
 
     @bot.command()
     async def purge(ctx, user: discord.User, amount: int):
@@ -286,81 +239,7 @@ async def run_bot(token):
         await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
-    @bot.command(name="h")
-    async def help_cmd(ctx):
-        help_message = (
-            "**Commands:**\n"
-            "\n"
-            "**🔹 Reacting:**\n"
-            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
-            "\n"
-            "**🔹 Spamming:**\n"
-            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
-            "\n"
-            "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`, `!lyrics`, `!stoplyrics`\n"
-            "\n"
-            "**🔹 Moderation:**\n"
-            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
-            "\n"
-            "**🔹 Email:**\n"
-            "`!tempmail [count]`, `!checkmail <email>`, `!emails`\n"
-            "\n"
-            "*:3*"
-        )
-        await ctx.send(help_message)
-        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
-        await ctx.message.delete()
-
-    # Lyrics commands
-    @bot.command()
-    async def lyrics(ctx, *, query: str):
-        await ctx.message.delete()
-        # Cancel any previous lyrics task for this user
-        if ctx.author.id in lyrics_tasks:
-            lyrics_tasks[ctx.author.id].cancel()
-            lyrics_tasks.pop(ctx.author.id, None)
-        try:
-            song = genius.search_song(query)
-            if not song:
-                await ctx.send("No lyrics found for that song.")
-                return
-            # Start updating status with lyrics line by line
-            lines = song.lyrics.split('\n')
-            task = asyncio.create_task(update_lyrics_status(bot, lines, ctx.author.id))
-            lyrics_tasks[ctx.author.id] = task
-            await ctx.send(f"Lyrics found for **{song.title}** by *{song.artist}*. Status updating...")
-        except Exception as e:
-            await ctx.send(f"Error fetching lyrics: {e}")
-
-    @bot.command()
-    async def stoplyrics(ctx):
-        task = lyrics_tasks.get(ctx.author.id)
-        if task:
-            task.cancel()
-            lyrics_tasks.pop(ctx.author.id, None)
-            await ctx.send("Lyrics status updating stopped.")
-        else:
-            await ctx.send("No active lyrics status to stop.")
-
-    async def update_lyrics_status(bot, lines, user_id):
-        try:
-            idx = 0
-            while True:
-                line = lines[idx].strip()
-                if line:
-                    status_text = line if len(line) <= 128 else line[:125] + "..."
-                    await bot.change_presence(activity=discord.Game(name=status_text))
-                else:
-                    # If empty line, show a default or clear
-                    await bot.change_presence(activity=discord.Game(name=""))
-                idx = (idx + 1) % len(lines)
-                await asyncio.sleep(7)
-        except asyncio.CancelledError:
-            # Clear status when stopped
-            await bot.change_presence(activity=None)
-
-    # Temp mail commands
+    # ---------- TEMPMAIL ----------
     @bot.command()
     async def tempmail(ctx, count: int = 1):
         await ctx.message.delete()
@@ -376,11 +255,10 @@ async def run_bot(token):
                         return
                     data = await resp.json()
                     emails.append(data[0])
-        # Save emails with expiry days (e.g. 1 day)
         with open(EMAILS_FILE, "a") as f:
             for email in emails:
-                f.write(f"{email} 1\n")  # 1 day expiry for example
-        await ctx.send(f"Generated temp email(s):\n" + "\n".join(emails))
+                f.write(f"{email}\n")
+        await ctx.send("Generated temp email(s):\n" + "\n".join(emails))
 
     @bot.command()
     async def checkmail(ctx, email: str):
@@ -391,11 +269,9 @@ async def run_bot(token):
             await ctx.send("Invalid email format!")
             return
         url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={username}&domain={domain}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; DiscordBot/1.0; +https://discord.com)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
+            async with session.get(url, headers=headers, ssl=False) as resp:
                 if resp.status != 200:
                     await ctx.send(f"Failed to check email, HTTP status: {resp.status}")
                     return
@@ -405,7 +281,7 @@ async def run_bot(token):
                     return
                 messages = []
                 for msg in data:
-                    messages.append(f"From: {msg['from']}\nSubject: {msg['subject']}\nDate: {msg['date']}\nID: {msg['id']}\n---")
+                    messages.append(f"From: {msg['from']} | Subject: {msg['subject']} | Date: {msg['date']}")
                 await ctx.send(f"Emails for {email}:\n" + "\n".join(messages))
 
     @bot.command()
@@ -413,14 +289,64 @@ async def run_bot(token):
         await ctx.message.delete()
         try:
             with open(EMAILS_FILE, "r") as f:
-                lines = f.readlines()
+                lines = [line.strip() for line in f if line.strip()]
             if not lines:
                 await ctx.send("No stored emails.")
                 return
-            lines = [line.strip() for line in lines]
-            await ctx.send("Stored temp emails (email + days left):\n" + "\n".join(lines))
+            await ctx.send("Stored temp emails:\n" + "\n".join(lines))
         except FileNotFoundError:
             await ctx.send("No stored emails yet.")
+
+    # ---------- LYRICS ----------
+    @bot.command()
+    async def lyrics(ctx, *, query: str):
+        await ctx.message.delete()
+        task = lyric_tasks.get(ctx.author.id)
+        if task:
+            task.cancel()
+        try:
+            song = genius.search_song(query)
+            if not song:
+                await ctx.send("No lyrics found.")
+                return
+            await ctx.send(f"Lyrics found for **{song.title}** by *{song.artist}*")
+            task = asyncio.create_task(lyrics_status(bot, song.lyrics.split("\n")))
+            lyric_tasks[ctx.author.id] = task
+        except Exception as e:
+            await ctx.send(f"Error fetching lyrics: {e}")
+
+    async def lyrics_status(bot, lines):
+        while True:
+            for line in lines:
+                if line.strip():
+                    await bot.change_presence(activity=discord.Game(name=line.strip()))
+                    await asyncio.sleep(5)
+
+    @bot.command()
+    async def stoplyrics(ctx):
+        task = lyric_tasks.get(ctx.author.id)
+        if task:
+            task.cancel()
+            lyric_tasks.pop(ctx.author.id, None)
+            await ctx.send("Stopped lyrics status.")
+        else:
+            await ctx.send("No active lyrics status.")
+
+    # ---------- HELP ----------
+    @bot.command(name="h")
+    async def help_cmd(ctx):
+        help_message = (
+            "**Commands:**\n\n"
+            "**🔹 Reacting:** `!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
+            "**🔹 Spamming:** `!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
+            "**🔹 Status:** `!rpc`, `!statusall`, `!typer`, `!stoptyper`, `!lyrics`, `!stoplyrics`\n"
+            "**🔹 Moderation:** `!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
+            "**🔹 Temp Mail:** `!tempmail`, `!checkmail`, `!emails`\n"
+            "\n*:3*"
+        )
+        await ctx.send(help_message)
+        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
+        await ctx.message.delete()
 
     await bot.start(token)
 
