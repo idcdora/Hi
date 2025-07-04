@@ -40,24 +40,13 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
-async def cycle_lyrics(bot, title, lines):
-    try:
-        while True:
-            for line in lines:
-                activity = discord.Game(name=f"{title} - {line}")
-                await bot.change_presence(activity=activity)
-                await asyncio.sleep(8)
-    except asyncio.CancelledError:
-        await bot.change_presence(activity=None)
-        return
-
 # Run single bot
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
     typer_tasks = {}
-    lyric_task = None  # For managing lyrics status update task
+    lyrics_tasks = {}
 
     @bot.event
     async def on_ready():
@@ -101,7 +90,6 @@ async def run_bot(token):
             except Exception as e:
                 print("SPAMALL error:", e)
 
-        # Snipe tracking for deleted messages
         await bot.process_commands(message)
 
     # Snipe storage
@@ -110,7 +98,7 @@ async def run_bot(token):
     @bot.event
     async def on_message_delete(message):
         if message.author.id == bot.user.id:
-            return  # Don't snipe own deletions (optional)
+            return
         snipes[message.channel.id] = message
 
     @bot.command()
@@ -322,7 +310,7 @@ async def run_bot(token):
             "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
             "\n"
             "**🔹 Lyrics:**\n"
-            "`!lyrics <song name or link>`\n"
+            "`!lyrics <song name or link>`, `!stoplyrics`\n"
             "\n"
             "*:3*"
         )
@@ -330,29 +318,68 @@ async def run_bot(token):
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
-    # Lyrics command using Genius API
+    # Lyrics command using Genius API + updating status with lyrics line by line
     @bot.command()
     async def lyrics(ctx, *, query: str):
-        nonlocal lyric_task
         await ctx.message.delete()
+
+        # Cancel any existing lyrics task for this user
+        old_task = lyrics_tasks.get(ctx.author.id)
+        if old_task:
+            old_task.cancel()
+
         try:
             song = genius.search_song(query)
             if not song:
                 await ctx.send("No lyrics found for that song.")
                 return
 
-            # Cancel old task if exists
-            if lyric_task and not lyric_task.done():
-                lyric_task.cancel()
-                await asyncio.sleep(1)
-
-            await ctx.send(f"Lyrics found! Now updating status for **{song.title}** by *{song.artist}*.")
-
+            # Prepare lyrics lines, split by line and filter empty lines
             lines = [line.strip() for line in song.lyrics.split('\n') if line.strip()]
-            lyric_task = asyncio.create_task(cycle_lyrics(bot, song.title, lines))
+            if not lines:
+                await ctx.send("Lyrics are empty.")
+                return
+
+            async def update_status():
+                idx = 0
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "Authorization": token,
+                        "Content-Type": "application/json"
+                    }
+                    while True:
+                        line = lines[idx]
+                        payload = {
+                            "custom_status": {
+                                "text": line[:128]  # max 128 chars for Discord custom status text
+                            }
+                        }
+                        async with session.patch(
+                            "https://discord.com/api/v9/users/@me/settings",
+                            json=payload,
+                            headers=headers
+                        ) as response:
+                            if response.status != 200:
+                                print(f"Failed to update status: {response.status}")
+                        idx = (idx + 1) % len(lines)
+                        await asyncio.sleep(7)  # update every 7 seconds
+
+            task = asyncio.create_task(update_status())
+            lyrics_tasks[ctx.author.id] = task
 
         except Exception as e:
-            await ctx.send(f"Error fetching lyrics: {e}")
+            await ctx.send(f"Error fetching lyrics or updating status: {e}")
+
+    # Stop lyrics status update command
+    @bot.command()
+    async def stoplyrics(ctx):
+        task = lyrics_tasks.get(ctx.author.id)
+        if task:
+            task.cancel()
+            lyrics_tasks.pop(ctx.author.id, None)
+            await ctx.send("Lyrics status updates stopped.")
+        else:
+            await ctx.send("No active lyrics status update to stop.")
 
     await bot.start(token)
 
