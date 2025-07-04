@@ -2,7 +2,9 @@ import discord
 from discord.ext import commands
 import asyncio
 import aiohttp
+import base64
 import requests
+import lyricsgenius
 
 watched_users = {}
 watched_roles = set()
@@ -11,8 +13,17 @@ token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
 
+# Genius API setup
 GENIUS_TOKEN = "ILkH7espIOfaqvoQ_PSxeUP9nsPonM7C65kb0bZL2l8lUh0B33vJiXN0whJ5mUKf"
+genius = lyricsgenius.Genius(GENIUS_TOKEN)
+genius._session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+})
+genius.remove_section_headers = True
+genius.skip_non_songs = True
+genius.excluded_terms = ["(Remix)", "(Live)"]
 
+# Load tokens
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
@@ -35,15 +46,16 @@ async def webhook_spam(url, message, count):
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
+
     typer_tasks = {}
     lyrics_tasks = {}
+
+    snipes = {}
 
     @bot.event
     async def on_ready():
         print(f"[+] Logged in as {bot.user}")
         token_user_ids.add(bot.user.id)
-
-    snipes = {}
 
     @bot.event
     async def on_message(message):
@@ -59,6 +71,7 @@ async def run_bot(token):
             watched_roles.intersection(author_roles) or
             (message.guild and message.guild.id in react_all_servers)
         )
+
         if should_react:
             try:
                 if author_id in watched_users:
@@ -69,8 +82,8 @@ async def run_bot(token):
                     emojis = []
                 for emoji in emojis:
                     await message.add_reaction(emoji)
-            except:
-                pass
+            except Exception as e:
+                print("Reaction error:", e)
 
         if message.content.startswith("[[SPAMALL_TRIGGER]]::") and message.author != bot.user:
             try:
@@ -78,8 +91,8 @@ async def run_bot(token):
                 for _ in range(int(count)):
                     await message.channel.send(msg)
                     await asyncio.sleep(0.1)
-            except:
-                pass
+            except Exception as e:
+                print("SPAMALL error:", e)
 
         await bot.process_commands(message)
 
@@ -96,8 +109,10 @@ async def run_bot(token):
             await ctx.send("Nothing to snipe!")
             return
         content = msg.content or "[embed/image]"
-        await ctx.send(f"Sniped message from {msg.author}: {content}")
+        author = msg.author
+        await ctx.send(f"Sniped message from {author}: {content}")
 
+    # Blacklist commands
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -110,8 +125,12 @@ async def run_bot(token):
         await ctx.send(f"User {user_id} unblacklisted.")
         await ctx.message.delete()
 
+    # React commands
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
+        if not emojis:
+            await ctx.send("Please provide at least one emoji.")
+            return
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -136,6 +155,9 @@ async def run_bot(token):
 
     @bot.command()
     async def reactall(ctx, server_id: int, *emojis):
+        if not emojis:
+            await ctx.send("Please provide at least one emoji.")
+            return
         react_all_servers[server_id] = list(emojis)
         await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -146,6 +168,7 @@ async def run_bot(token):
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
 
+    # Spam commands
     @bot.command()
     async def spam(ctx, *, args):
         try:
@@ -184,6 +207,7 @@ async def run_bot(token):
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
 
+    # Status & typer commands
     @bot.command()
     async def typer(ctx, channel_id: int):
         channel = bot.get_channel(channel_id)
@@ -224,58 +248,30 @@ async def run_bot(token):
         await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
-    @bot.command(name="h")
-    async def help_cmd(ctx):
-        help_message = (
-            "**Commands:**\n\n"
-            "**🔹 Reacting:**\n"
-            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
-            "**🔹 Spamming:**\n"
-            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n\n"
-            "**🔹 Status:**\n"
-            "`!typer`, `!stoptyper`, `!lyrics`, `!stoplyrics`\n\n"
-            "**🔹 Moderation:**\n"
-            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
-            "*:3*"
-        )
-        await ctx.send(help_message)
-        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
-        await ctx.message.delete()
-
-    # Lyrics with direct Genius API and updating STATUS every 4 sec
+    # Lyrics command that sets status by line
     @bot.command()
     async def lyrics(ctx, *, query: str):
-        await ctx.send(f"Searching lyrics for `{query}`...")
         await ctx.message.delete()
         try:
-            headers = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
-            search = requests.get("https://api.genius.com/search", params={"q": query}, headers=headers).json()
-            hits = search["response"]["hits"]
-            if not hits:
-                await ctx.send("No lyrics found.")
+            song = genius.search_song(query)
+            if not song:
+                await ctx.send("No lyrics found for that song.")
                 return
-            song_id = hits[0]["result"]["id"]
-            song_title = hits[0]["result"]["full_title"]
-
-            song_page = requests.get(f"https://api.genius.com/songs/{song_id}", headers=headers).json()
-            lyrics_url = song_page["response"]["song"]["url"]
-
-            page_html = requests.get(lyrics_url).text
-            lyrics_lines = page_html.split("\n")
-            lyrics_lines = [line.strip() for line in lyrics_lines if line.strip()][:100]
-
-            await ctx.send(f"🎵 Now updating status with lyrics from **{song_title}**...")
-
-            async def lyrics_loop():
-                for line in lyrics_lines:
-                    await bot.change_presence(activity=discord.Game(name=line[:128]))
-                    await asyncio.sleep(4)
-
-            task = asyncio.create_task(lyrics_loop())
+            await ctx.send(f"Lyrics found for **{song.title}** by *{song.artist}*!")
+            lines = [line.strip() for line in song.lyrics.split("\n") if line.strip()]
+            if not lines:
+                await ctx.send("Couldn't extract lyrics lines.")
+                return
+            task = asyncio.create_task(lyrics_loop(bot, lines))
             lyrics_tasks[ctx.author.id] = task
-
         except Exception as e:
-            await ctx.send(f"Error fetching lyrics or updating status: {e}")
+            await ctx.send(f"Error fetching lyrics: {e}")
+
+    async def lyrics_loop(bot, lines):
+        while True:
+            for line in lines:
+                await bot.change_presence(activity=discord.Game(name=line))
+                await asyncio.sleep(5)
 
     @bot.command()
     async def stoplyrics(ctx):
@@ -285,7 +281,30 @@ async def run_bot(token):
             lyrics_tasks.pop(ctx.author.id, None)
             await ctx.send("Stopped lyrics status.")
         else:
-            await ctx.send("You don't have any active lyrics.")
+            await ctx.send("No active lyrics.")
+
+    @bot.command(name="h")
+    async def help_cmd(ctx):
+        help_message = (
+            "**Commands:**\n"
+            "\n"
+            "**🔹 Reacting:**\n"
+            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
+            "\n"
+            "**🔹 Spamming:**\n"
+            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
+            "\n"
+            "**🔹 Status:**\n"
+            "`!typer`, `!stoptyper`, `!lyrics`, `!stoplyrics`\n"
+            "\n"
+            "**🔹 Moderation:**\n"
+            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
+            "\n"
+            "*:3*"
+        )
+        await ctx.send(help_message)
+        await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
+        await ctx.message.delete()
 
     await bot.start(token)
 
