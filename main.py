@@ -40,13 +40,24 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
+async def cycle_lyrics(bot, title, lines):
+    try:
+        while True:
+            for line in lines:
+                activity = discord.Game(name=f"{title} - {line}")
+                await bot.change_presence(activity=activity)
+                await asyncio.sleep(8)
+    except asyncio.CancelledError:
+        await bot.change_presence(activity=None)
+        return
+
 # Run single bot
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
     typer_tasks = {}
-    lyric_task = None  # Store current lyrics cycling task
+    lyric_task = None  # For managing lyrics status update task
 
     @bot.event
     async def on_ready():
@@ -90,6 +101,7 @@ async def run_bot(token):
             except Exception as e:
                 print("SPAMALL error:", e)
 
+        # Snipe tracking for deleted messages
         await bot.process_commands(message)
 
     # Snipe storage
@@ -143,7 +155,6 @@ async def run_bot(token):
     @bot.command()
     async def watchrole(ctx, role: discord.Role, *emojis):
         watched_roles.add(role.id)
-        # Store emojis per role if you want (here we just watch role)
         await ctx.send(f"Watching role {role.name} with emojis: {''.join(emojis) if emojis else 'None'}")
         await ctx.message.delete()
 
@@ -319,18 +330,7 @@ async def run_bot(token):
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
-    # --- Lyrics cycling in status ---
-
-    async def cycle_lyrics(bot, song_title, lyrics_lines):
-        try:
-            while True:
-                for line in lyrics_lines:
-                    status_text = f"Listening to {song_title} | {line[:100]}"
-                    await bot.change_presence(activity=discord.Game(name=status_text))
-                    await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            await bot.change_presence(activity=None)
-
+    # Lyrics command using Genius API
     @bot.command()
     async def lyrics(ctx, *, query: str):
         nonlocal lyric_task
@@ -346,10 +346,7 @@ async def run_bot(token):
                 lyric_task.cancel()
                 await asyncio.sleep(1)
 
-            preview = song.lyrics[:500].strip()
-            if len(song.lyrics) > 500:
-                preview += "..."
-            await ctx.send(f"**{song.title}** by *{song.artist}*\n{preview}")
+            await ctx.send(f"Lyrics found! Now updating status for **{song.title}** by *{song.artist}*.")
 
             lines = [line.strip() for line in song.lyrics.split('\n') if line.strip()]
             lyric_task = asyncio.create_task(cycle_lyrics(bot, song.title, lines))
