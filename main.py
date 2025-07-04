@@ -1,9 +1,9 @@
 import discord
 from discord.ext import commands
 import asyncio
-import aiohttp
 import requests
 from bs4 import BeautifulSoup
+import time
 import re
 
 watched_users = {}
@@ -12,97 +12,127 @@ react_all_servers = {}
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
-typer_tasks = {}
 lyrics_tasks = {}
 
-# Load tokens
 with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
-def get_lyrics(song_title, artist_name):
-    artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
-    title = re.sub(r'[^a-z0-9]', '', song_title.lower())
-    url = f"https://www.azlyrics.com/lyrics/{artist}/{title}.html"
+# ----------------
+# AZLyrics lyric search
+# ----------------
+def get_lyrics_from_azlyrics(song_query):
+    search_url = f"https://search.azlyrics.com/search.php?q={requests.utils.quote(song_query)}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return None
-    soup = BeautifulSoup(response.text, "html.parser")
-    divs = soup.find_all("div")
+    search_page = requests.get(search_url, headers=headers)
+
+    if search_page.status_code != 200:
+        return None, f"Could not perform search (status code {search_page.status_code})."
+
+    soup = BeautifulSoup(search_page.text, "html.parser")
+    table = soup.find("table", class_="table table-condensed")
+    if not table:
+        return None, "No results found."
+    first_link = table.find("a")
+    if not first_link or not first_link.get("href"):
+        return None, "No valid link found."
+
+    lyrics_url = first_link["href"]
+    lyrics_page = requests.get(lyrics_url, headers=headers)
+    if lyrics_page.status_code != 200:
+        return None, f"Could not fetch lyrics page (status {lyrics_page.status_code})."
+
+    lyrics_soup = BeautifulSoup(lyrics_page.text, "html.parser")
+    divs = lyrics_soup.find_all("div")
     for div in divs:
         if div.attrs == {}:
-            lyrics = div.get_text(separator="\n").strip()
-            return lyrics
-    return None
+            text = div.get_text(separator="\n").strip()
+            return text.splitlines(), None
 
-async def mass_dm(guild, message):
-    for member in guild.members:
-        if not member.bot:
-            try:
-                await member.send(message)
-            except:
-                pass
+    return None, "Lyrics not found on the page."
 
-async def webhook_spam(url, message, count):
-    async with aiohttp.ClientSession() as session:
-        for _ in range(count):
-            try:
-                await session.post(url, json={"content": message})
-            except:
-                pass
-
+# ----------------
+# Run bot
+# ----------------
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
+    typer_tasks = {}
+    snipes = {}
 
     @bot.event
     async def on_ready():
         print(f"[+] Logged in as {bot.user}")
         token_user_ids.add(bot.user.id)
 
-    snipes = {}
-
-    @bot.event
-    async def on_message_delete(message):
-        if message.author.id != bot.user.id:
-            snipes[message.channel.id] = message
-
     @bot.event
     async def on_message(message):
         if message.author.id in blacklisted_users:
             return
-        author_id = message.author.id
-        author_roles = {role.id for role in getattr(message.author, "roles", [])}
-        should_react = (
-            author_id == bot.user.id or
-            author_id in token_user_ids or
-            author_id in watched_users or
-            watched_roles.intersection(author_roles) or
-            (message.guild and message.guild.id in react_all_servers)
-        )
-        if should_react:
-            try:
-                if author_id in watched_users:
-                    emojis = watched_users[author_id]
-                elif message.guild and message.guild.id in react_all_servers:
-                    emojis = react_all_servers[message.guild.id]
-                else:
-                    emojis = []
-                for emoji in emojis:
-                    await message.add_reaction(emoji)
-            except Exception as e:
-                print("Reaction error:", e)
         await bot.process_commands(message)
 
+    @bot.event
+    async def on_message_delete(message):
+        if message.author.id == bot.user.id:
+            return
+        snipes[message.channel.id] = message
+
+    # ----------------
+    # Lyrics commands
+    # ----------------
+    @bot.command()
+    async def lyrics(ctx, *, query):
+        await ctx.send(f"Searching lyrics for: `{query}`")
+        lines, error = get_lyrics_from_azlyrics(query)
+        if error:
+            await ctx.send(f"❌ {error}")
+            return
+
+        await ctx.send(f"✅ Lyrics found for `{query}` — updating status...")
+
+        old_task = lyrics_tasks.get(ctx.author.id)
+        if old_task:
+            old_task.cancel()
+
+        task = asyncio.create_task(lyrics_status_loop(bot, lines))
+        lyrics_tasks[ctx.author.id] = task
+
+    async def lyrics_status_loop(bot_instance, lines):
+        idx = 0
+        while True:
+            line = lines[idx % len(lines)].strip()
+            if line:
+                try:
+                    await bot_instance.change_presence(activity=None)
+                    await bot_instance.change_presence(activity=discord.Game(name=line))
+                except Exception as e:
+                    print("Error updating status:", e)
+            idx += 1
+            await asyncio.sleep(1.5)
+
+    @bot.command()
+    async def stoplyrics(ctx):
+        task = lyrics_tasks.get(ctx.author.id)
+        if task:
+            task.cancel()
+            lyrics_tasks.pop(ctx.author.id, None)
+            await ctx.send("🛑 Stopped lyrics status.")
+        else:
+            await ctx.send("You don't have any active lyrics status.")
+
+    # ----------------
+    # Snipe command
+    # ----------------
     @bot.command()
     async def snipe(ctx):
         msg = snipes.get(ctx.channel.id)
         if not msg:
             await ctx.send("Nothing to snipe!")
             return
-        content = msg.content or "[embed/image]"
-        await ctx.send(f"Sniped message from {msg.author}: {content}")
+        await ctx.send(f"Sniped message from {msg.author}: {msg.content or '[embed/image]'}")
 
+    # ----------------
+    # Blacklist
+    # ----------------
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -115,11 +145,11 @@ async def run_bot(token):
         await ctx.send(f"User {user_id} unblacklisted.")
         await ctx.message.delete()
 
+    # ----------------
+    # React commands
+    # ----------------
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
-        if not emojis:
-            await ctx.send("Provide at least one emoji.")
-            return
         watched_users[user.id] = list(emojis)
         await ctx.send(f"Now reacting to {user.name} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -144,9 +174,6 @@ async def run_bot(token):
 
     @bot.command()
     async def reactall(ctx, server_id: int, *emojis):
-        if not emojis:
-            await ctx.send("Provide at least one emoji.")
-            return
         react_all_servers[server_id] = list(emojis)
         await ctx.send(f"Reacting in server {server_id} with {''.join(emojis)}")
         await ctx.message.delete()
@@ -156,6 +183,22 @@ async def run_bot(token):
         react_all_servers.pop(server_id, None)
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
+
+    # ----------------
+    # Spamming
+    # ----------------
+    async def mass_dm(guild, message):
+        for member in guild.members:
+            if not member.bot:
+                try:
+                    await member.send(message)
+                except:
+                    pass
+
+    async def webhook_spam(url, message, count):
+        async with aiohttp.ClientSession() as session:
+            for _ in range(count):
+                await session.post(url, json={"content": message})
 
     @bot.command()
     async def spam(ctx, *, args):
@@ -195,6 +238,9 @@ async def run_bot(token):
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
 
+    # ----------------
+    # Typing
+    # ----------------
     @bot.command()
     async def typer(ctx, channel_id: int):
         channel = bot.get_channel(channel_id)
@@ -212,13 +258,17 @@ async def run_bot(token):
 
     @bot.command()
     async def stoptyper(ctx):
-        task = typer_tasks.pop(ctx.author.id, None)
+        task = typer_tasks.get(ctx.author.id)
         if task:
             task.cancel()
+            typer_tasks.pop(ctx.author.id, None)
             await ctx.send("Typing stopped.")
         else:
-            await ctx.send("No active typer.")
+            await ctx.send("You don't have any active typer.")
 
+    # ----------------
+    # Purge
+    # ----------------
     @bot.command()
     async def purge(ctx, user: discord.User, amount: int):
         deleted = 0
@@ -234,63 +284,29 @@ async def run_bot(token):
         await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
+    # ----------------
+    # Help
+    # ----------------
     @bot.command(name="h")
     async def help_cmd(ctx):
         help_message = (
             "**Commands:**\n\n"
-            "**🔹 Reacting:**\n"
-            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
-            "**🔹 Spamming:**\n"
-            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n\n"
-            "**🔹 Status:**\n"
-            "`!lyrics`, `!stoplyrics`, `!typer`, `!stoptyper`\n\n"
-            "**🔹 Moderation:**\n"
-            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
+            "**🔹 Reacting:** `!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
+            "**🔹 Spamming:** `!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
+            "**🔹 Status:** `!typer`, `!stoptyper`, `!lyrics`, `!stoplyrics`\n"
+            "**🔹 Moderation:** `!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
             "*:3*"
         )
         await ctx.send(help_message)
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
-    @bot.command()
-    async def lyrics(ctx, *, args):
-        try:
-            song_title, artist_name = args.split(",", 1)
-        except:
-            await ctx.send("Usage: !lyrics <song>,<artist>")
-            return
-        await ctx.message.delete()
-        if ctx.author.id in lyrics_tasks:
-            lyrics_tasks[ctx.author.id].cancel()
-        lyrics = get_lyrics(song_title.strip(), artist_name.strip())
-        if not lyrics:
-            await ctx.send("Could not find lyrics.")
-            return
-        lines = [line for line in lyrics.split("\n") if line.strip()]
-        await ctx.send("Found lyrics! Updating status every 1.5s.")
-        task = asyncio.create_task(lyrics_status_loop(bot, lines))
-        lyrics_tasks[ctx.author.id] = task
-
-    async def lyrics_status_loop(bot, lines):
-        i = 0
-        while True:
-            line = lines[i % len(lines)]
-            await bot.change_presence(status=discord.Status.online, activity=discord.CustomActivity(name=line))
-            await asyncio.sleep(1.5)
-            i += 1
-
-    @bot.command()
-    async def stoplyrics(ctx):
-        task = lyrics_tasks.pop(ctx.author.id, None)
-        if task:
-            task.cancel()
-            await ctx.send("Stopped lyrics status.")
-        else:
-            await ctx.send("No active lyrics.")
-
     await bot.start(token)
 
+# ----------------
+# Main runner
+# ----------------
 async def main():
-    await asyncio.gather(*(run_bot(token) for token in tokens))
+    await asyncio.gather(*(run_bot(token) for token in tokens if token))
 
 asyncio.run(main())
