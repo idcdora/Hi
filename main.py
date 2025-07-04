@@ -2,8 +2,6 @@ import discord
 from discord.ext import commands
 import asyncio
 import aiohttp
-import base64
-import requests
 import lyricsgenius
 
 watched_users = {}  # user_id -> list of emojis
@@ -48,6 +46,7 @@ async def run_bot(token):
     all_bots.append(bot)
 
     typer_tasks = {}
+    lyric_task = None  # Store current lyrics cycling task
 
     @bot.event
     async def on_ready():
@@ -91,8 +90,6 @@ async def run_bot(token):
             except Exception as e:
                 print("SPAMALL error:", e)
 
-        # Snipe tracking for deleted messages
-        # We'll track last deleted messages per channel
         await bot.process_commands(message)
 
     # Snipe storage
@@ -308,10 +305,13 @@ async def run_bot(token):
             "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
             "\n"
             "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`, `!typer`\n"
+            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
             "\n"
             "**🔹 Moderation:**\n"
             "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
+            "\n"
+            "**🔹 Lyrics:**\n"
+            "`!lyrics <song name or link>`\n"
             "\n"
             "*:3*"
         )
@@ -319,21 +319,41 @@ async def run_bot(token):
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
-    # Lyrics command using Genius API
+    # --- Lyrics cycling in status ---
+
+    async def cycle_lyrics(bot, song_title, lyrics_lines):
+        try:
+            while True:
+                for line in lyrics_lines:
+                    status_text = f"Listening to {song_title} | {line[:100]}"
+                    await bot.change_presence(activity=discord.Game(name=status_text))
+                    await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await bot.change_presence(activity=None)
+
     @bot.command()
     async def lyrics(ctx, *, query: str):
+        nonlocal lyric_task
         await ctx.message.delete()
         try:
             song = genius.search_song(query)
             if not song:
                 await ctx.send("No lyrics found for that song.")
                 return
+
+            # Cancel old task if exists
+            if lyric_task and not lyric_task.done():
+                lyric_task.cancel()
+                await asyncio.sleep(1)
+
             preview = song.lyrics[:500].strip()
             if len(song.lyrics) > 500:
                 preview += "..."
             await ctx.send(f"**{song.title}** by *{song.artist}*\n{preview}")
-            # Update status with song title only
-            await bot.change_presence(activity=discord.Game(name=f"Listening to {song.title}"))
+
+            lines = [line.strip() for line in song.lyrics.split('\n') if line.strip()]
+            lyric_task = asyncio.create_task(cycle_lyrics(bot, song.title, lines))
+
         except Exception as e:
             await ctx.send(f"Error fetching lyrics: {e}")
 
