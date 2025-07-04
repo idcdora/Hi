@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import base64
 import requests
+import lyricsgenius
 
 watched_users = {}  # user_id -> list of emojis
 watched_roles = set()
@@ -11,7 +12,13 @@ react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
 all_bots = []
 blacklisted_users = {}
-sniped_messages = {}  # channel_id -> (author, content)
+
+# Genius API setup (your token)
+GENIUS_TOKEN = "ILkH7espIOfaqvoQ_PSxeUP9nsPonM7C65kb0bZL2l8lUh0B33vJiXN0whJ5mUKf"
+genius = lyricsgenius.Genius(GENIUS_TOKEN)
+genius.remove_section_headers = True
+genius.skip_non_songs = True
+genius.excluded_terms = ["(Remix)", "(Live)"]
 
 # Load tokens
 with open("tokens.txt", "r") as f:
@@ -35,55 +42,17 @@ async def webhook_spam(url, message, count):
             except:
                 pass
 
-async def fetch_lyrics(song_name):
-    # Simple Genius lyrics fetcher without API token using web scraping
-    import aiohttp
-    from bs4 import BeautifulSoup
-
-    query = song_name.replace(" ", "+")
-    search_url = f"https://genius.com/api/search/multi?per_page=5&q={query}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(search_url) as resp:
-            data = await resp.json()
-    sections = data.get("response", {}).get("sections", [])
-    song_path = None
-    for section in sections:
-        if section["type"] == "song" and section["hits"]:
-            song_path = section["hits"][0]["result"]["path"]
-            break
-    if not song_path:
-        return None, None
-    song_url = "https://genius.com" + song_path
-    async with aiohttp.ClientSession() as session:
-        async with session.get(song_url) as resp:
-            text = await resp.text()
-    soup = BeautifulSoup(text, "html.parser")
-    lyrics_div = soup.find("div", class_="lyrics") or soup.find("div", class_="Lyrics__Container-sc-1ynbvzw-6 YYrds")
-    if not lyrics_div:
-        return None, None
-    lyrics = lyrics_div.get_text(separator="\n").strip()
-    title = soup.find("h1", class_="header_with_cover_art-primary_info-title")
-    title_text = title.text.strip() if title else song_name
-    return title_text, lyrics
-
+# Run single bot
 async def run_bot(token):
     bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
-    typing_tasks = {}  # channel_id -> asyncio.Task
+    typer_tasks = {}
 
     @bot.event
     async def on_ready():
         print(f"[+] Logged in as {bot.user}")
         token_user_ids.add(bot.user.id)
-
-    @bot.event
-    async def on_message_delete(message):
-        if message.guild:
-            sniped_messages[message.channel.id] = (message.author, message.content)
-        else:
-            # For DMs, store using channel id
-            sniped_messages[message.channel.id] = (message.author, message.content)
 
     @bot.event
     async def on_message(message):
@@ -122,10 +91,30 @@ async def run_bot(token):
             except Exception as e:
                 print("SPAMALL error:", e)
 
+        # Snipe tracking for deleted messages
+        # We'll track last deleted messages per channel
         await bot.process_commands(message)
 
-    # Commands
+    # Snipe storage
+    snipes = {}
 
+    @bot.event
+    async def on_message_delete(message):
+        if message.author.id == bot.user.id:
+            return  # Don't snipe own deletions (optional)
+        snipes[message.channel.id] = message
+
+    @bot.command()
+    async def snipe(ctx):
+        msg = snipes.get(ctx.channel.id)
+        if not msg:
+            await ctx.send("Nothing to snipe!")
+            return
+        content = msg.content or "[embed/image]"
+        author = msg.author
+        await ctx.send(f"Sniped message from {author}: {content}")
+
+    # Blacklist commands
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -138,6 +127,7 @@ async def run_bot(token):
         await ctx.send(f"User {user_id} unblacklisted.")
         await ctx.message.delete()
 
+    # React commands
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
         if not emojis:
@@ -156,8 +146,8 @@ async def run_bot(token):
     @bot.command()
     async def watchrole(ctx, role: discord.Role, *emojis):
         watched_roles.add(role.id)
-        # Optionally store emojis per role if you want more control here
-        await ctx.send(f"Watching role {role.name} with emojis {''.join(emojis) if emojis else '(default)'}")
+        # Store emojis per role if you want (here we just watch role)
+        await ctx.send(f"Watching role {role.name} with emojis: {''.join(emojis) if emojis else 'None'}")
         await ctx.message.delete()
 
     @bot.command()
@@ -181,6 +171,7 @@ async def run_bot(token):
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
 
+    # Spam commands
     @bot.command()
     async def spam(ctx, *, args):
         try:
@@ -219,6 +210,7 @@ async def run_bot(token):
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
 
+    # Status commands
     @bot.command()
     async def rpc(ctx, activity_type: str, *, activity_message: str):
         types = {
@@ -261,61 +253,49 @@ async def run_bot(token):
         await ctx.send(f"All bots updated to {activity_type} {activity_message}")
         await ctx.message.delete()
 
+    # Typing command with stop feature
     @bot.command()
     async def typer(ctx, channel_id: int):
         channel = bot.get_channel(channel_id)
         if not channel:
             await ctx.send("Invalid channel ID.")
             return
-        if channel_id in typing_tasks:
-            await ctx.send("Already typing in that channel.")
-            return
+        await ctx.send(f"Typing forever in <#{channel_id}> (use !stoptyper to stop)")
+        task = asyncio.create_task(typing_loop(channel))
+        typer_tasks[ctx.author.id] = task
 
-        await ctx.send(f"Typing forever in <#{channel_id}>")
-
-        async def typing_loop():
-            try:
-                while True:
-                    async with channel.typing():
-                        await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                pass
-
-        task = bot.loop.create_task(typing_loop())
-        typing_tasks[channel_id] = task
+    async def typing_loop(channel):
+        while True:
+            async with channel.typing():
+                await asyncio.sleep(5)
 
     @bot.command()
-    async def stoptyper(ctx, channel_id: int):
-        task = typing_tasks.get(channel_id)
+    async def stoptyper(ctx):
+        task = typer_tasks.get(ctx.author.id)
         if task:
             task.cancel()
-            typing_tasks.pop(channel_id, None)
-            await ctx.send(f"Stopped typing in <#{channel_id}>")
+            typer_tasks.pop(ctx.author.id, None)
+            await ctx.send("Typing stopped.")
         else:
-            await ctx.send("No typing task found for that channel.")
-        await ctx.message.delete()
+            await ctx.send("You don't have any active typer.")
 
+    # Purge command: deletes a number of messages from a specific user
     @bot.command()
     async def purge(ctx, user: discord.User, amount: int):
-        def is_user(m):
-            return m.author.id == user.id
-        deleted = await ctx.channel.purge(limit=amount, check=is_user)
-        await ctx.send(f"Deleted {len(deleted)} messages from {user.name}.", delete_after=5)
+        deleted = 0
+        async for msg in ctx.channel.history(limit=1000):
+            if deleted >= amount:
+                break
+            if msg.author == user:
+                try:
+                    await msg.delete()
+                    deleted += 1
+                except:
+                    pass
+        await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
-    @bot.command()
-    async def snipe(ctx):
-        data = sniped_messages.get(ctx.channel.id)
-        if data:
-            author, content = data
-            if author == bot.user:
-                await ctx.send("Nothing to snipe.")
-                return
-            await ctx.send(f"Sniped message from **{author}**:\n{content}")
-        else:
-            await ctx.send("No recently deleted message found.")
-        await ctx.message.delete()
-
+    # Help command (simple text + gif after)
     @bot.command(name="h")
     async def help_cmd(ctx):
         help_message = (
@@ -328,7 +308,7 @@ async def run_bot(token):
             "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
             "\n"
             "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`, `!lyrics`\n"
+            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
             "\n"
             "**🔹 Moderation:**\n"
             "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
@@ -339,16 +319,23 @@ async def run_bot(token):
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
+    # Lyrics command using Genius API
     @bot.command()
-    async def lyrics(ctx, *, song_name: str):
-        await ctx.send(f"Fetching lyrics for: {song_name}")
-        title, lyrics = await fetch_lyrics(song_name)
-        if not lyrics:
-            await ctx.send("Lyrics not found.")
-            return
-        # Send song title big and lyrics smaller
-        await ctx.send(f"**{title}**\n\n{lyrics}")
+    async def lyrics(ctx, *, query: str):
         await ctx.message.delete()
+        try:
+            song = genius.search_song(query)
+            if not song:
+                await ctx.send("No lyrics found for that song.")
+                return
+            preview = song.lyrics[:500].strip()
+            if len(song.lyrics) > 500:
+                preview += "..."
+            await ctx.send(f"**{song.title}** by *{song.artist}*\n{preview}")
+            # Update status with song title only
+            await bot.change_presence(activity=discord.Game(name=f"Listening to {song.title}"))
+        except Exception as e:
+            await ctx.send(f"Error fetching lyrics: {e}")
 
     await bot.start(token)
 
