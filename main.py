@@ -5,54 +5,94 @@ import aiohttp
 import requests
 from bs4 import BeautifulSoup
 import re
-import json
 
+# Load tokens from tokens.txt (one token per line)
+with open("tokens.txt", "r") as f:
+    tokens = [line.strip() for line in f if line.strip()]
+
+all_bots = []
 watched_users = {}  # user_id -> list of emojis
 watched_roles = set()
 react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
-all_bots = []
 blacklisted_users = {}
-lyrics_tasks = {}
 
-# Load tokens
-with open("tokens.txt", "r") as f:
-    tokens = [line.strip() for line in f if line.strip()]
-
-def get_lyrics(song_title, artist_name=""):
-    # Format artist and title for AZLyrics
-    artist_clean = re.sub(r'[^a-z0-9]', '', artist_name.lower())
-    title_clean = re.sub(r'[^a-z0-9]', '', song_title.lower())
-    if artist_clean:
-        url = f"https://www.azlyrics.com/lyrics/{artist_clean}/{title_clean}.html"
-    else:
-        url = f"https://www.azlyrics.com/lyrics/{title_clean[0]}/{title_clean}.html"
-
+# === Lyrics API 1: AZLyrics ===
+def get_lyrics_azlyrics(song_title, artist_name):
+    artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
+    title = re.sub(r'[^a-z0-9]', '', song_title.lower())
+    url = f"https://www.azlyrics.com/lyrics/{artist}/{title}.html"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        divs = soup.find_all("div")
+        for div in divs:
+            if div.attrs == {}:  # lyrics div no class/id
+                lyrics = div.get_text(separator="\n").strip()
+                return lyrics
     except Exception:
         return None
-
-    if response.status_code != 200:
-        return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # AZLyrics lyrics div has no class or id, it's the first div after the <div class="ringtone"> element
-    for div in soup.find_all("div"):
-        if div.attrs == {}:
-            lyrics = div.get_text(separator="\n").strip()
-            if lyrics:
-                return lyrics
     return None
 
+# === Lyrics API 2: LyricsFreak ===
+def get_lyrics_lyricsfreak(song_title, artist_name):
+    # LyricsFreak URL format: https://www.lyricsfreak.com/<artist>/<song>-lyrics.html
+    artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
+    title = re.sub(r'[^a-z0-9]', '', song_title.lower())
+    url = f"https://www.lyricsfreak.com/{artist[0]}/{artist}/{title}-lyrics.html"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        lyrics_div = soup.find("div", class_="lyrictxt js-lyrics js-share-text-content")
+        if lyrics_div:
+            lyrics = lyrics_div.get_text(separator="\n").strip()
+            return lyrics
+    except Exception:
+        return None
+    return None
+
+# === Utility to try all lyric APIs in order ===
+def get_lyrics(song_title, artist_name):
+    lyrics = get_lyrics_azlyrics(song_title, artist_name)
+    if lyrics:
+        return lyrics
+    lyrics = get_lyrics_lyricsfreak(song_title, artist_name)
+    if lyrics:
+        return lyrics
+    return None
+
+# === Custom status updater ===
+async def set_custom_status(token, text):
+    url = "https://discord.com/api/v10/users/@me/settings"
+    headers = {
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "custom_status": {
+            "text": text[:128],  # max 128 chars
+            "emoji_name": None
+        }
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.patch(url, json=payload, headers=headers) as resp:
+            if resp.status == 200:
+                return True
+            else:
+                print(f"Failed to update custom status: {resp.status}")
+                return False
+
 async def run_bot(token):
-    intents = discord.Intents.none()  # For selfbot
-    bot = commands.Bot(command_prefix="!", self_bot=True, intents=intents)
+    bot = commands.Bot(command_prefix="!", self_bot=True)
     all_bots.append(bot)
 
-    typer_tasks = {}
+    lyric_task = None
 
     @bot.event
     async def on_ready():
@@ -98,13 +138,12 @@ async def run_bot(token):
 
         await bot.process_commands(message)
 
-    # Snipe storage
     snipes = {}
 
     @bot.event
     async def on_message_delete(message):
         if message.author.id == bot.user.id:
-            return  # Optionally don't snipe own deletions
+            return
         snipes[message.channel.id] = message
 
     @bot.command()
@@ -117,7 +156,6 @@ async def run_bot(token):
         author = msg.author
         await ctx.send(f"Sniped message from {author}: {content}")
 
-    # Blacklist commands
     @bot.command()
     async def blacklist(ctx, user_id: int):
         blacklisted_users[user_id] = True
@@ -130,7 +168,6 @@ async def run_bot(token):
         await ctx.send(f"User {user_id} unblacklisted.")
         await ctx.message.delete()
 
-    # React commands
     @bot.command()
     async def react(ctx, user: discord.User, *emojis):
         if not emojis:
@@ -173,7 +210,6 @@ async def run_bot(token):
         await ctx.send(f"Stopped reacting in server {server_id}")
         await ctx.message.delete()
 
-    # Spam commands
     @bot.command()
     async def spam(ctx, *, args):
         try:
@@ -206,13 +242,28 @@ async def run_bot(token):
             await mass_dm(ctx.guild, message)
         await ctx.send("Done mass DM spam.")
 
+    async def mass_dm(guild, message):
+        for member in guild.members:
+            if not member.bot:
+                try:
+                    await member.send(message)
+                except:
+                    pass
+
     @bot.command()
     async def webhookspam(ctx, url, message, count: int):
         await ctx.send(f"Spamming webhook {count}x...")
         await webhook_spam(url, message, count)
         await ctx.send("Done.")
 
-    # Status commands (presence changing, big status)
+    async def webhook_spam(url, message, count):
+        async with aiohttp.ClientSession() as session:
+            for _ in range(count):
+                try:
+                    await session.post(url, json={"content": message})
+                except:
+                    pass
+
     @bot.command()
     async def rpc(ctx, activity_type: str, *, activity_message: str):
         types = {
@@ -255,7 +306,6 @@ async def run_bot(token):
         await ctx.send(f"All bots updated to {activity_type} {activity_message}")
         await ctx.message.delete()
 
-    # Typing command with stop feature
     @bot.command()
     async def typer(ctx, channel_id: int):
         channel = bot.get_channel(channel_id)
@@ -265,6 +315,8 @@ async def run_bot(token):
         await ctx.send(f"Typing forever in <#{channel_id}> (use !stoptyper to stop)")
         task = asyncio.create_task(typing_loop(channel))
         typer_tasks[ctx.author.id] = task
+
+    typer_tasks = {}
 
     async def typing_loop(channel):
         while True:
@@ -281,7 +333,6 @@ async def run_bot(token):
         else:
             await ctx.send("You don't have any active typer.")
 
-    # Purge command: deletes a number of messages from a specific user
     @bot.command()
     async def purge(ctx, user: discord.User, amount: int):
         deleted = 0
@@ -297,7 +348,6 @@ async def run_bot(token):
         await ctx.send(f"Deleted {deleted} messages from {user.name}.", delete_after=5)
         await ctx.message.delete()
 
-    # Help command (simple text + gif after)
     @bot.command(name="h")
     async def help_cmd(ctx):
         help_message = (
@@ -316,7 +366,7 @@ async def run_bot(token):
             "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
             "\n"
             "**🔹 Lyrics:**\n"
-            "`!lyrics <song> - <artist>`, `!stoplyrics`\n"
+            "`!lyrics <Song> - <Artist>`, `!stoplyrics`\n"
             "\n"
             "*:3*"
         )
@@ -324,84 +374,47 @@ async def run_bot(token):
         await ctx.send("https://cdn.discordapp.com/attachments/1277997527790125177/1390331382718267554/3W1f9kiH.gif")
         await ctx.message.delete()
 
-    # Lyrics custom status commands
-
-    async def set_custom_status(text):
-        payload = {
-            "activities": [
-                {
-                    "name": text[:128],
-                    "type": 4,
-                    "state": text[:128]
-                }
-            ],
-            "status": "online",
-            "since": 0,
-            "afk": False
-        }
-        await bot.ws.send(json.dumps({
-            "op": 3,
-            "d": payload
-        }))
-
-    async def clear_custom_status():
-        payload = {
-            "activities": [],
-            "status": "online",
-            "since": 0,
-            "afk": False
-        }
-        await bot.ws.send(json.dumps({
-            "op": 3,
-            "d": payload
-        }))
-
-    async def lyrics_loop(ctx, song_title, artist_name):
-        lyrics = get_lyrics(song_title, artist_name)
-        if not lyrics:
-            await ctx.send("Lyrics not found.")
-            return
-        lines = [line.strip() for line in lyrics.split("\n") if line.strip()]
-        if not lines:
-            await ctx.send("No valid lyrics found.")
-            return
-
-        await ctx.send(f"Showing lyrics for **{song_title}** by *{artist_name}* in custom status.")
-
-        try:
-            while True:
-                for line in lines:
-                    await set_custom_status(line)
-                    await asyncio.sleep(1.5)
-        except asyncio.CancelledError:
-            await clear_custom_status()
-            await ctx.send("Lyrics custom status stopped.")
-
+    # === Lyrics custom status commands ===
     @bot.command()
-    async def lyrics(ctx, *, query: str):
-        parts = query.split(" - ", 1)
-        song_title = parts[0].strip()
-        artist_name = parts[1].strip() if len(parts) > 1 else ""
-
-        # Cancel previous lyrics task if running
-        task = lyrics_tasks.get(ctx.author.id)
-        if task:
-            task.cancel()
-
-        task = asyncio.create_task(lyrics_loop(ctx, song_title, artist_name))
-        lyrics_tasks[ctx.author.id] = task
-
+    async def lyrics(ctx, *, song: str):
+        nonlocal lyric_task
+        if " - " not in song:
+            await ctx.send("Please provide song and artist like `Song Title - Artist`")
+            return
+        song_name, artist_name = song.split(" - ", 1)
         await ctx.message.delete()
+        lyrics = get_lyrics(song_name, artist_name)
+        if not lyrics:
+            await ctx.send("Lyrics not found on any source.")
+            return
+        lines = [line.strip() for line in lyrics.splitlines() if line.strip()]
+        if not lines:
+            await ctx.send("No valid lyrics lines found.")
+            return
+        if lyric_task:
+            lyric_task.cancel()
+        async def update_status_loop():
+            try:
+                while True:
+                    for line in lines:
+                        await set_custom_status(bot.http.token, line)
+                        await asyncio.sleep(1.5)  # update every 1.5 seconds
+            except asyncio.CancelledError:
+                await set_custom_status(bot.http.token, "")  # Clear status on stop
+        lyric_task = asyncio.create_task(update_status_loop())
+        await ctx.send("Started updating custom status with lyrics!")
 
     @bot.command()
     async def stoplyrics(ctx):
-        task = lyrics_tasks.get(ctx.author.id)
-        if task:
-            task.cancel()
-            lyrics_tasks.pop(ctx.author.id, None)
-        else:
-            await ctx.send("No active lyrics custom status.")
+        nonlocal lyric_task
         await ctx.message.delete()
+        if lyric_task:
+            lyric_task.cancel()
+            lyric_task = None
+            await set_custom_status(bot.http.token, "")  # Clear status
+            await ctx.send("Stopped lyrics custom status update.")
+        else:
+            await ctx.send("No lyrics update running.")
 
     await bot.start(token)
 
