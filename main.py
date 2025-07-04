@@ -308,7 +308,7 @@ async def run_bot(token):
             "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
             "\n"
             "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
+            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`, `!typer`\n"
             "\n"
             "**🔹 Moderation:**\n"
             "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
