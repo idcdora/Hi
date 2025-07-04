@@ -35,7 +35,6 @@ def get_lyrics(song_title, artist_name):
             return lyrics
     return None
 
-# Mass DM util
 async def mass_dm(guild, message):
     for member in guild.members:
         if not member.bot:
@@ -44,7 +43,6 @@ async def mass_dm(guild, message):
             except:
                 pass
 
-# Webhook spam util
 async def webhook_spam(url, message, count):
     async with aiohttp.ClientSession() as session:
         for _ in range(count):
@@ -269,7 +267,7 @@ async def run_bot(token):
             await ctx.send("Could not find lyrics.")
             return
         lines = [line for line in lyrics.split("\n") if line.strip()]
-        await ctx.send("Found lyrics! Updating small status every 4s.")
+        await ctx.send("Found lyrics! Updating status every 1.5s.")
         task = asyncio.create_task(lyrics_status_loop(bot, lines))
         lyrics_tasks[ctx.author.id] = task
 
@@ -278,7 +276,7 @@ async def run_bot(token):
         while True:
             line = lines[i % len(lines)]
             await bot.change_presence(status=discord.Status.online, activity=discord.CustomActivity(name=line))
-            await asyncio.sleep(4)
+            await asyncio.sleep(1.5)
             i += 1
 
     @bot.command()
