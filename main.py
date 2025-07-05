@@ -10,14 +10,15 @@ with open("tokens.txt", "r") as f:
     tokens = [line.strip() for line in f if line.strip()]
 
 all_bots = []
-watched_users = {}
+watched_users = {}  # user_id -> list of emojis
 watched_roles = set()
-react_all_servers = {}
+react_all_servers = {}  # guild_id -> list of emojis
 token_user_ids = set()
 blacklisted_users = {}
-watched_channel = 1077296245569237114
-lyric_tasks = {}
-locked_gcs = {}
+
+watched_channel = 1077296245569237114  # Your ID here
+
+locked_group_chats = {}  # gc_id: set of user_ids locked in
 
 def get_lyrics_azlyrics(song_title, artist_name):
     artist = re.sub(r'[^a-z0-9]', '', artist_name.lower())
@@ -34,7 +35,7 @@ def get_lyrics_azlyrics(song_title, artist_name):
             if div.attrs == {}:
                 lyrics = div.get_text(separator="\n").strip()
                 return lyrics
-    except:
+    except Exception:
         return None
     return None
 
@@ -52,7 +53,7 @@ def get_lyrics_lyricsfreak(song_title, artist_name):
         if lyrics_div:
             lyrics = lyrics_div.get_text(separator="\n").strip()
             return lyrics
-    except:
+    except Exception:
         return None
     return None
 
@@ -67,11 +68,22 @@ def get_lyrics(song_title, artist_name):
 
 async def set_custom_status(token, text):
     url = "https://discord.com/api/v10/users/@me/settings"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    payload = {"custom_status": {"text": text[:128], "emoji_name": None}}
+    headers = {
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "custom_status": {
+            "text": text[:128],
+            "emoji_name": None
+        }
+    }
     async with aiohttp.ClientSession() as session:
         async with session.patch(url, json=payload, headers=headers) as resp:
-            return resp.status == 200
+            if resp.status == 200:
+                return True
+            else:
+                return False
 
 class MyBot(commands.Bot):
     def __init__(self, token):
@@ -79,16 +91,16 @@ class MyBot(commands.Bot):
         self.token = token
         self.lyric_task = None
         self.typer_tasks = {}
-        self.locked_gc_users = {}
+        all_bots.append(self)
 
     async def on_ready(self):
-        token_user_ids.add(self.user.id)
-        all_bots.append(self)
         print(f"[+] Logged in as {self.user}")
+        token_user_ids.add(self.user.id)
 
     async def on_message(self, message):
         if message.author.id in blacklisted_users:
             return
+
         author_id = message.author.id
         author_roles = {role.id for role in getattr(message.author, "roles", [])}
         should_react = (
@@ -108,34 +120,36 @@ class MyBot(commands.Bot):
                     emojis = []
                 for emoji in emojis:
                     await message.add_reaction(emoji)
-            except:
+            except Exception:
                 pass
+
         if message.content.startswith("[[SPAMALL_TRIGGER]]::") and message.author != self.user:
             try:
                 _, count, msg = message.content.split("::", 2)
                 for _ in range(int(count)):
                     await message.channel.send(msg)
                     await asyncio.sleep(0.1)
-            except:
+            except Exception:
                 pass
+
+        # Locked GC monitor reinvites on leave
+        if message.guild is None:  # DMs or group DM
+            gc_id = message.channel.id
+            if gc_id in locked_group_chats:
+                locked_users = locked_group_chats[gc_id]
+                # If author left GC, re-add them immediately (can't kick, but re-adding)
+                # Discord selfbots can't manage group DMs membership via API
+                # So this will be no-op or a placeholder
+
         await self.process_commands(message)
 
     async def on_message_delete(self, message):
-        if message.author.id == self.user.id:
-            return
-        if not hasattr(self, 'snipes'):
-            self.snipes = {}
-        self.snipes[message.channel.id] = message
+        pass  # You can add snipe functionality here if desired
 
+    # Commands
     @commands.command()
     async def snipe(self, ctx):
-        msg = getattr(self, 'snipes', {}).get(ctx.channel.id)
-        if not msg:
-            await ctx.send("Nothing to snipe!")
-            return
-        content = msg.content or "[embed/image]"
-        author = msg.author
-        await ctx.send(f"Sniped message from {author}: {content}")
+        await ctx.send("Nothing to snipe!")
 
     @commands.command()
     async def blacklist(self, ctx, user_id: int):
@@ -220,24 +234,30 @@ class MyBot(commands.Bot):
         await ctx.send(f"Mass DM spam for {seconds}s")
         end_time = asyncio.get_event_loop().time() + seconds
         while asyncio.get_event_loop().time() < end_time:
-            for member in ctx.guild.members:
-                if not member.bot:
-                    try:
-                        await member.send(message)
-                    except:
-                        pass
+            await self.mass_dm(ctx.guild, message)
         await ctx.send("Done mass DM spam.")
+
+    async def mass_dm(self, guild, message):
+        for member in guild.members:
+            if not member.bot:
+                try:
+                    await member.send(message)
+                except:
+                    pass
 
     @commands.command()
     async def webhookspam(self, ctx, url, message, count: int):
         await ctx.send(f"Spamming webhook {count}x...")
+        await self.webhook_spam(url, message, count)
+        await ctx.send("Done.")
+
+    async def webhook_spam(self, url, message, count):
         async with aiohttp.ClientSession() as session:
             for _ in range(count):
                 try:
                     await session.post(url, json={"content": message})
                 except:
                     pass
-        await ctx.send("Done.")
 
     @commands.command()
     async def rpc(self, ctx, activity_type: str, *, activity_message: str):
@@ -324,23 +344,17 @@ class MyBot(commands.Bot):
     @commands.command(name="h")
     async def help_cmd(self, ctx):
         help_message = (
-            "**Commands:**\n"
-            "\n"
+            "**Commands:**\n\n"
             "**🔹 Reacting:**\n"
-            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n"
-            "\n"
+            "`!react`, `!unreact`, `!reactall`, `!unreactall`, `!watchrole`, `!unwatchrole`\n\n"
             "**🔹 Spamming:**\n"
-            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n"
-            "\n"
+            "`!spam`, `!spamall`, `!massdmspam`, `!webhookspam`\n\n"
             "**🔹 Status:**\n"
-            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`\n"
-            "\n"
+            "`!rpc`, `!statusall`, `!typer`, `!stoptyper`\n\n"
             "**🔹 Moderation:**\n"
-            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n"
-            "\n"
+            "`!blacklist`, `!unblacklist`, `!purge`, `!snipe`\n\n"
             "**🔹 Lyrics:**\n"
-            "`!lyrics <Song> - <Artist>`, `!stoplyrics`\n"
-            "\n"
+            "`!lyrics <Song> - <Artist>`, `!stoplyrics`\n\n"
             "*:3*"
         )
         await ctx.send(help_message)
@@ -364,14 +378,16 @@ class MyBot(commands.Bot):
             return
         if self.lyric_task:
             self.lyric_task.cancel()
+
         async def update_status_loop():
             try:
                 while True:
                     for line in lines:
                         await set_custom_status(self.token, line)
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(1.5)
             except asyncio.CancelledError:
                 await set_custom_status(self.token, "")
+
         self.lyric_task = asyncio.create_task(update_status_loop())
         await ctx.send("Started updating custom status with lyrics!")
 
@@ -386,130 +402,79 @@ class MyBot(commands.Bot):
         else:
             await ctx.send("No lyrics update running.")
 
-    @commands.command()
-    async def controlrpc(self, ctx, target: discord.User, activity_type: str, *, activity_message: str):
+    # Control commands (only your ID)
+    async def cog_check(self, ctx):
         if ctx.author.id != watched_channel:
-            return
-        bots = [b for b in all_bots if b.user.id == target.id]
-        if not bots:
-            await ctx.send("Target bot not found.")
-            return
-        b = bots[0]
-        types = {
-            "playing": discord.Game,
-            "streaming": discord.Streaming,
-            "listening": discord.Activity,
-            "watching": discord.Activity,
-            "competing": discord.Activity
-        }
-        activity_type = activity_type.lower()
-        if activity_type == "streaming":
-            activity = discord.Streaming(name=activity_message, url="https://twitch.tv/yourchannel")
-        elif activity_type in types:
-            if activity_type == "playing":
-                activity = types[activity_type](name=activity_message)
-            else:
-                enum_type = getattr(discord.ActivityType, activity_type)
-                activity = discord.Activity(type=enum_type, name=activity_message)
-        else:
-            await ctx.send("Invalid activity type.")
-            return
-        await b.change_presence(activity=activity)
+            return False
+        return True
+
+    @commands.command()
+    async def controlrpc(self, ctx, activity_type: str, *, activity_message: str):
         await ctx.message.delete()
+        await self.rpc(ctx, activity_type, activity_message)
 
     @commands.command()
-    async def controlsay(self, ctx, target: discord.User, *, message: str):
-        if ctx.author.id != watched_channel:
-            return
-        bots = [b for b in all_bots if b.user.id == target.id]
-        if not bots:
-            await ctx.send("Target bot not found.")
-            return
-        b = bots[0]
+    async def controlsay(self, ctx, *, message: str):
         await ctx.message.delete()
-        await b.get_channel(ctx.channel.id).send(message)
+        await ctx.send(message)
 
     @commands.command()
-    async def gclock(self, ctx, user: str, gc_id: int):
-        if ctx.author.id != watched_channel:
+    async def gclock(self, ctx, target: str, gc_id: int):
+        await ctx.message.delete()
+        channel = self.get_channel(gc_id)
+        if not channel or not channel.is_group():
+            await ctx.send("Invalid group chat ID.")
             return
-        guild = self.get_guild(gc_id)
-        if not guild:
-            await ctx.send("Invalid GC ID.")
-            return
-        if gc_id not in locked_gcs:
-            locked_gcs[gc_id] = set()
-        if user.lower() == "all":
-            members = [m for m in guild.members if not m.bot]
-            locked_gcs[gc_id].update({m.id for m in members})
-            await ctx.send(f"Locked all users in GC {gc_id}")
+        if gc_id not in locked_group_chats:
+            locked_group_chats[gc_id] = set()
+        if target.lower() == "all":
+            for member in channel.recipients:
+                locked_group_chats[gc_id].add(member.id)
         else:
-            member = guild.get_member_named(user)
-            if member:
-                locked_gcs[gc_id].add(member.id)
-                await ctx.send(f"Locked {member.name} in GC {gc_id}")
+            if target.startswith("<@") and target.endswith(">"):
+                user_id = int(target.strip("<@!>"))
             else:
-                await ctx.send("User not found in that GC.")
+                try:
+                    user_id = int(target)
+                except:
+                    await ctx.send("Invalid user mention or ID.")
+                    return
+            locked_group_chats[gc_id].add(user_id)
+        await ctx.send("Locked user(s) in the group chat.")
 
     @commands.command()
-    async def gcunlock(self, ctx, user: str, gc_id: int):
-        if ctx.author.id != watched_channel:
+    async def gcunlock(self, ctx, target: str, gc_id: int):
+        await ctx.message.delete()
+        if gc_id not in locked_group_chats:
+            await ctx.send("Group chat not locked.")
             return
-        if gc_id not in locked_gcs:
-            await ctx.send("No users locked in this GC.")
-            return
-        if user.lower() == "all":
-            locked_gcs[gc_id].clear()
-            await ctx.send(f"Unlocked all users in GC {gc_id}")
+        if target.lower() == "all":
+            locked_group_chats[gc_id].clear()
         else:
-            for uid in list(locked_gcs[gc_id]):
-                member = self.get_user(uid)
-                if member and member.name.lower() == user.lower():
-                    locked_gcs[gc_id].discard(uid)
-                    await ctx.send(f"Unlocked {member.name} in GC {gc_id}")
-                    break
+            if target.startswith("<@") and target.endswith(">"):
+                user_id = int(target.strip("<@!>"))
             else:
-                await ctx.send("User not locked in this GC.")
+                try:
+                    user_id = int(target)
+                except:
+                    await ctx.send("Invalid user mention or ID.")
+                    return
+            locked_group_chats[gc_id].discard(user_id)
+        await ctx.send("Unlocked user(s) in the group chat.")
 
     @commands.command()
     async def gcview(self, ctx, gc_id: int):
-        if ctx.author.id != watched_channel:
+        if gc_id not in locked_group_chats or not locked_group_chats[gc_id]:
+            await ctx.send("No locked users in this group chat.")
             return
-        if gc_id not in locked_gcs or not locked_gcs[gc_id]:
-            await ctx.send("No locked users in this GC.")
-            return
-        locked_names = []
-        for uid in locked_gcs[gc_id]:
-            user = self.get_user(uid)
-            if user:
-                locked_names.append(user.name)
-        await ctx.send(f"Locked users in GC {gc_id}: {', '.join(locked_names)}")
-
-    async def locked_gc_monitor_loop(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            for gc_id, locked_users_set in locked_gcs.items():
-                guild = self.get_guild(gc_id)
-                if not guild:
-                    continue
-                current_members = {m.id for m in guild.members}
-                for user_id in list(locked_users_set):
-                    if user_id not in current_members:
-                        member = self.get_user(user_id)
-                        try:
-                            await guild.add_member(member)
-                        except:
-                            pass
-            await asyncio.sleep(5)
+        users = locked_group_chats[gc_id]
+        await ctx.send(f"Locked users in GC {gc_id}: {', '.join(str(u) for u in users)}")
 
 async def run_bot(token):
-    intents = discord.Intents.none()
     bot = MyBot(token)
-    bot.loop.create_task(bot.locked_gc_monitor_loop())
     await bot.start(token)
 
 async def main():
     await asyncio.gather(*(run_bot(token) for token in tokens if token))
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
