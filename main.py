@@ -501,7 +501,7 @@ async def run_bot(token):
         locked_users = locked_gcs[channel_id]
         mentions = " ".join(f"<@{uid}>" for uid in locked_users)
         await ctx.send(f"Locked users in group DM {channel_id}:\n{mentions}", delete_after=15)
-        @bot.command()
+    @bot.command()
     async def controlsay(ctx, *, msg):
         if ctx.author.id != watched_channel:
             return
